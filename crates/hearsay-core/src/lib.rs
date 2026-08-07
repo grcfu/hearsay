@@ -4,5 +4,7 @@
 //! functions here and owns no business logic.
 
 pub mod paths;
+pub mod transcribe;
 
 pub use hearsay_audio::Mode;
+pub use transcribe::{Channel, TranscriptSegment, TranscriptionResult};
