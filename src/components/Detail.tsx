@@ -197,7 +197,10 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
       </div>
 
       <div className="detail-body">
-        <TranscriptionProgress progress={progress} />
+        <TranscriptionProgress
+          progress={progress}
+          channels={event.mode === "conversation" ? 2 : 1}
+        />
 
         {tab === "summary" ? (
           <SummaryTab
@@ -242,31 +245,90 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
   );
 }
 
-function TranscriptionProgress({ progress }: { progress: TranscriptionEvent | null }) {
+/**
+ * Where transcription has got to.
+ *
+ * Transcribing a long meeting takes minutes, and the previous version said only
+ * "Transcribing…" — indistinguishable from being stuck. This shows how far along it is,
+ * and for a conversation recording it accounts for both channels: the microphone pass
+ * fills the first half of the bar and the system pass the second, so the bar tracks the
+ * whole job rather than restarting halfway.
+ *
+ * The fill is sapphire. Gold means recording and nothing else.
+ */
+function TranscriptionProgress({
+  progress,
+  channels,
+}: {
+  progress: TranscriptionEvent | null;
+  channels: number;
+}) {
+  // How many channel passes have finished, so the bar keeps climbing across them.
+  const [done, setDone] = useState(0);
+
+  useEffect(() => {
+    if (!progress) return;
+    if (progress.stage === "started") setDone(0);
+    if (progress.stage === "channel_done") setDone((n) => n + 1);
+  }, [progress]);
+
   if (!progress || progress.stage === "done") return null;
 
-  const text = (() => {
-    switch (progress.stage) {
-      case "started":
-        return "Transcribing…";
-      case "downloading":
-        return `Downloading the speech model, ${progress.percent ?? 0}%. This happens once.`;
-      case "model_ready":
-        return "Model ready, transcribing…";
-      case "transcribing":
-        return `Transcribing the ${progress.channel === "left" ? "microphone" : "system"} channel, ${progress.percent ?? 0}%`;
-      case "channel_done":
-        return "Finishing up…";
-      case "failed":
-        return `Transcription failed: ${progress.message ?? "unknown error"}`;
-      default:
-        return null;
-    }
-  })();
+  if (progress.stage === "failed") {
+    return (
+      <div className="banner problem">
+        Transcription failed: {progress.message ?? "unknown error"}
+      </div>
+    );
+  }
 
-  if (!text) return null;
+  const downloading = progress.stage === "downloading";
+  const transcribing = progress.stage === "transcribing";
+
+  // Downloads report their own percentage. Transcription reports per channel, so it is
+  // scaled into the overall job.
+  const percent = downloading
+    ? (progress.percent ?? 0)
+    : transcribing
+      ? Math.min(100, ((done + (progress.percent ?? 0) / 100) / Math.max(channels, 1)) * 100)
+      : null;
+
+  const label = downloading
+    ? "Downloading the speech model — this happens once"
+    : progress.stage === "started"
+      ? "Getting ready"
+      : progress.stage === "model_ready"
+        ? "Model loaded, starting to listen"
+        : transcribing
+          ? channels > 1
+            ? `Transcribing ${progress.channel === "left" ? "your side" : "their side"} (${Math.min(done + 1, channels)} of ${channels})`
+            : "Transcribing"
+          : "Finishing up";
+
   return (
-    <div className={`banner${progress.stage === "failed" ? " problem" : ""}`}>{text}</div>
+    <div className="progress-card">
+      <div className="progress-head">
+        <span className="progress-label">{label}</span>
+        {percent === null ? (
+          <span className="progress-percent">working…</span>
+        ) : (
+          <span className="progress-percent mono">{Math.round(percent)}%</span>
+        )}
+      </div>
+      <div
+        className={`progress-track${percent === null ? " indeterminate" : ""}`}
+        role="progressbar"
+        aria-valuenow={percent === null ? undefined : Math.round(percent)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={label}
+      >
+        <div
+          className="progress-fill"
+          style={percent === null ? undefined : { width: `${percent}%` }}
+        />
+      </div>
+    </div>
   );
 }
 

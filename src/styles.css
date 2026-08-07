@@ -161,15 +161,21 @@ select {
   overflow: hidden;
 }
 
+/*
+ * Height is set by the tallest control plus even breathing room above and below, rather
+ * than by a number that happened to fit. At 56px the controls filled the bar edge to
+ * edge and read as crammed; 76px gives each one air on every side, and the groups are
+ * separated by more than the gaps inside them so the eye can tell them apart.
+ */
 .topbar {
   display: flex;
   align-items: center;
-  gap: var(--s5);
+  gap: var(--s6);
   background: var(--royal);
   color: var(--white);
   /* Left padding clears the traffic lights, which sit over a transparent title bar. */
-  padding: 0 var(--s5) 0 84px;
-  height: 56px;
+  padding: 0 var(--s5) 0 86px;
+  height: 76px;
   flex: none;
   /* Nothing in the bar may push the controls past the right edge. */
   min-width: 0;
@@ -178,7 +184,7 @@ select {
 
 .brand {
   font-family: var(--font-display);
-  font-size: 20px;
+  font-size: 22px;
   font-weight: var(--weight-medium);
   letter-spacing: 0.005em;
   flex: none;
@@ -193,14 +199,19 @@ select {
 
 /* One line that reflects the current choice, rather than a caption under every control. */
 .bar-hint {
-  font-size: 12.5px;
-  opacity: 0.55;
+  font-size: 13px;
+  opacity: 0.5;
+  line-height: 1.35;
+  white-space: normal;
   margin: 0;
   flex: 1 1 auto;
   min-width: 0;
+  max-width: 30ch;
+  /* Two short lines read better in a tall bar than one clipped line. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .topbar-nav {
@@ -318,10 +329,10 @@ select {
   align-items: center;
   justify-content: center;
   gap: var(--s2);
-  padding: var(--s3) var(--s5);
+  padding: var(--s4) var(--s6);
   border-radius: var(--radius);
   font-weight: var(--weight-medium);
-  font-size: 15px;
+  font-size: 15.5px;
   flex: none;
   letter-spacing: 0.005em;
   background: var(--quicksand);
@@ -375,8 +386,8 @@ select {
 .live-indicator {
   display: flex;
   align-items: center;
-  gap: var(--s2);
-  padding: var(--s2) var(--s3);
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
   border-radius: var(--radius-sm);
   background: rgb(255 255 255 / 8%);
 }
@@ -400,9 +411,10 @@ select {
 
 .mode-option {
   flex: 1;
-  padding: var(--s3) var(--s2);
-  border-radius: 4px;
+  padding: var(--s3) var(--s4);
+  border-radius: 5px;
   font-size: 14px;
+  white-space: nowrap;
   color: var(--white);
   opacity: 0.68;
   text-align: center;
@@ -739,8 +751,8 @@ select {
 /* ---------- Source picker and level meter ---------- */
 
 .app-select {
-  max-width: 230px;
-  padding: var(--s2) var(--s3);
+  max-width: 240px;
+  padding: var(--s3);
   border-radius: var(--radius-sm);
   border: 1px solid rgb(255 255 255 / 18%);
   background: rgb(255 255 255 / 8%);
@@ -1042,8 +1054,8 @@ kbd {
 .icon-nav {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   border-radius: var(--radius-sm);
   color: var(--white);
   opacity: 0.55;
@@ -1058,4 +1070,72 @@ kbd {
 .icon-nav.active {
   opacity: 1;
   background: var(--sapphire);
+}
+
+/* ---------- Transcription progress ---------- */
+
+.progress-card {
+  background: var(--swan);
+  border: var(--hairline);
+  border-radius: var(--radius);
+  padding: var(--s3) var(--s4);
+  margin-bottom: var(--s5);
+  max-width: var(--measure);
+}
+
+.progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: var(--s2);
+}
+
+.progress-label {
+  font-size: 13.5px;
+}
+
+.progress-percent {
+  font-size: 12.5px;
+  color: var(--sapphire);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-track {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--shellstone);
+  overflow: hidden;
+}
+
+/* Sapphire, not gold — gold means a recording is in progress and nothing else. */
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--sapphire);
+  transition: width 0.3s ease;
+}
+
+/* Before there is a percentage to show, a travelling bar says "working" without
+   pretending to know how far along it is. */
+.progress-track.indeterminate .progress-fill {
+  width: 35%;
+  animation: travel 1.3s ease-in-out infinite;
+}
+
+@keyframes travel {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-track.indeterminate .progress-fill {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
 }
