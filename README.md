@@ -79,9 +79,31 @@ you already granted one to your terminal while building.
 ### Reinstalling after a change
 
 ```sh
+cd /path/to/hearsay
 ./install.sh              # rebuild and replace /Applications/Hearsay.app
 ./install.sh --reset-tcc  # ...and clear the stored permission so macOS asks again
 ```
+
+A rebuild takes about a minute. It is not incremental in the way a dev build is: the
+frontend is compiled into the binary, so even a CSS change relinks the app. For
+iterating on the interface, `npm run tauri dev` reloads in seconds — use `install.sh`
+when you want the change in the real app.
+
+### Getting someone else's changes
+
+There is no update notification, by design — checking a server on launch is the thing
+this app does not do. To take new changes:
+
+```sh
+git pull
+./install.sh
+```
+
+Nothing breaks if you skip it; you keep running the version you built. The one case that
+needs care is the database. A newer build may migrate `hearsay.sqlite` forward, and an
+older build then refuses to open it rather than risking your recordings — it says so in
+a dialog and exits. Running `./install.sh` fixes it. Recordings are never touched by a
+migration.
 
 There is no auto-updater on purpose — an updater checks a server on every launch, and
 "no update checks" is one of this project's non-negotiables. This script does the same

@@ -42,10 +42,20 @@ base64 = "0.23"
 urlencoding = "2.1"
 cpal = "0.18"
 
+# Tuned for how this app is actually built: by the person using it, on their own
+# machine, after every change. Full LTO with a single codegen unit shaves a little off a
+# binary nobody downloads, and costs minutes on every rebuild — the wrong trade here.
+# Thin LTO keeps most of the benefit at a fraction of the link time.
 [profile.release]
+lto = "thin"
+codegen-units = 16
+strip = true
+
+# What a distributed build would use. Not used by install.sh.
+[profile.dist]
+inherits = "release"
 lto = true
 codegen-units = 1
-strip = true
 
 # Recording must never be starved by a debug build. Optimise the audio path
 # even in dev builds; the app itself stays unoptimised for fast iteration.

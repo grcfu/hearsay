@@ -32,6 +32,10 @@ pub fn run() {
         Err(error) => {
             tracing::error!("could not open the database: {error:#}");
             eprintln!("Hearsay could not start: {error:#}");
+            // Launched from Finder there is no terminal to print to, so without this the
+            // app simply fails to open with no explanation. The most likely cause is an
+            // older build meeting a database a newer one already migrated.
+            show_startup_failure(&format!("{error:#}"));
             std::process::exit(1);
         }
     };
@@ -89,6 +93,21 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("the Tauri runtime failed to start");
+}
+
+/// Reports a fatal startup problem in a dialog, since there may be no console.
+fn show_startup_failure(detail: &str) {
+    let message = format!(
+        "Hearsay could not start.\n\n{detail}\n\nIf you recently pulled changes, \
+         rebuild with ./install.sh — your recordings are untouched."
+    );
+    let script = format!(
+        "display dialog {} with title \"Hearsay\" buttons {{\"OK\"}} with icon caution",
+        serde_json::to_string(&message).unwrap_or_else(|_| "\"Hearsay could not start.\"".into())
+    );
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .status();
 }
 
 fn open_database() -> anyhow::Result<Database> {
