@@ -147,6 +147,10 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   // text that grew as fast as the bar would look absurd at full extension.
   const scale = Math.min(1.3, Math.max(0.88, 1 + (barHeight - 96) / 200));
 
+  // Captions are the first thing to drop when the bar is short. Squeezing them in
+  // makes every control feel cramped, and the toggle labels already say most of it.
+  const showCaptions = barHeight >= 104;
+
   // The calendar offers; it never starts anything. A recorder that arms itself is one
   // the user cannot trust to be off.
   useEffect(() => {
@@ -404,11 +408,11 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
 
       <div className="bar-group stack">
         <ModeToggle mode={mode} onChange={onModeChange} disabled={recording} />
-        <p className="bar-caption">
-          {mode === "listen_only"
-            ? "System audio only — the microphone is never opened."
-            : "Microphone on the left, system audio on the right."}
-        </p>
+        {showCaptions ? (
+          <p className="bar-caption">
+            {mode === "listen_only" ? "Your mic stays off" : "Records you and them"}
+          </p>
+        ) : null}
       </div>
 
       <div className="bar-group stack">
@@ -425,11 +429,11 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
             </option>
           ))}
         </select>
-        <p className="bar-caption">
-          {selectedApp
-            ? "Only this app — music alongside stays out."
-            : "Everything the machine plays, music included."}
-        </p>
+        {showCaptions ? (
+          <p className="bar-caption">
+            {selectedApp ? "Just this app" : "Includes music"}
+          </p>
+        ) : null}
       </div>
 
       <span className="spacer" />
