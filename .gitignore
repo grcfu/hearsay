@@ -1,0 +1,74 @@
+# --- Never commit user data ---
+# Recordings, transcripts, database, model weights.
+*.wav
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+data/
+recordings/
+models/
+*.bin
+*.gguf
+*.pt
+*.ckpt
+*.safetensors
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+credentials.json
+client_secret*.json
+token.json
+
+# --- Rust ---
+/target/
+**/target/
+Cargo.lock.bak
+
+# --- Node ---
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Python ---
+python/.venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Swift / Xcode ---
+helper/.build/
+helper/build/
+*.dSYM/
+DerivedData/
+.swiftpm/
+
+# --- Built helper binary (produced by helper/build.sh) ---
+/bin/
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# --- Editors ---
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
