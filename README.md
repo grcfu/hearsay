@@ -238,4 +238,4 @@ contract, the data model, and the design system.
 
 ## License
 
-Private project. All rights reserved.
+[MIT](./LICENSE). Use it, fork it, build on it.
