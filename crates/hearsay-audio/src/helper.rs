@@ -64,6 +64,9 @@ pub enum HelperEvent {
     Silence { elapsed_seconds: f64, message: String },
     Stopped { reason: String, frames: u64, nonzero_samples: u64 },
     Error { kind: String, message: String },
+    /// Permission looks missing, but capture is proceeding anyway. Advisory: the
+    /// silence check is what actually decides whether a recording is real.
+    PermissionWarning { message: String },
     /// A plain, non-JSON line. Kept so nothing the helper says is ever swallowed.
     Log { line: String },
 }
@@ -403,6 +406,9 @@ fn spawn_stderr_reader(
                             status.frames = *frames;
                         }
                     }
+                    HelperEvent::PermissionWarning { message } => {
+                        tracing::warn!("{message}");
+                    }
                     HelperEvent::Silence { message, .. } => {
                         tracing::error!("audio helper reports silence: {message}");
                         if let Ok(mut status) = status.lock() {
@@ -466,6 +472,9 @@ fn parse_event(line: &str) -> HelperEvent {
         },
         "error" => HelperEvent::Error {
             kind: text("kind"),
+            message: text("message"),
+        },
+        "permission_warning" => HelperEvent::PermissionWarning {
             message: text("message"),
         },
         _ => HelperEvent::Log {

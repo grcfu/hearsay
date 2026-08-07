@@ -14,6 +14,9 @@ struct AudioProcess: Codable {
     let name: String?
     let isRunningOutput: Bool
     let isRunningInput: Bool
+    /// True for a normal windowed application, false for daemons and agents. Lets the
+    /// picker offer "Chrome" and "Zoom" without also offering `cloudpaird`.
+    let isApplication: Bool
 
     enum CodingKeys: String, CodingKey {
         case objectID = "object_id"
@@ -22,6 +25,7 @@ struct AudioProcess: Codable {
         case name
         case isRunningOutput = "is_running_output"
         case isRunningInput = "is_running_input"
+        case isApplication = "is_application"
     }
 
     /// Written by hand so absent values encode as explicit `null` rather than being
@@ -35,6 +39,7 @@ struct AudioProcess: Codable {
         try c.encode(name, forKey: .name)
         try c.encode(isRunningOutput, forKey: .isRunningOutput)
         try c.encode(isRunningInput, forKey: .isRunningInput)
+        try c.encode(isApplication, forKey: .isApplication)
     }
 }
 
@@ -66,7 +71,8 @@ func allAudioProcesses() throws -> [AudioProcess] {
             bundleID: bundleID,
             name: displayName(pid: pid, bundleID: bundleID),
             isRunningOutput: running != 0,
-            isRunningInput: capturing != 0)
+            isRunningInput: capturing != 0,
+            isApplication: isRegularApplication(pid: pid))
     }
 }
 
@@ -94,6 +100,12 @@ func findProcesses(pid: Int32?, bundleID: String?) throws -> [AudioProcess] {
     }
 
     return []
+}
+
+/// Whether this pid is a normal windowed app rather than a background agent.
+private func isRegularApplication(pid: Int32) -> Bool {
+    guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+    return app.activationPolicy == .regular
 }
 
 /// Best available human-readable name. The running-application lookup covers GUI apps;

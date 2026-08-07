@@ -155,8 +155,7 @@ select {
   display: flex;
   flex-direction: column;
   gap: var(--s5);
-  padding: var(--s4) var(--s4) var(--s5);
-  padding-top: var(--titlebar);
+  padding: 0 var(--s4) var(--s4);
   overflow-y: auto;
 }
 
@@ -445,6 +444,7 @@ select {
 
 .detail-header {
   padding: var(--titlebar) var(--s6) 0;
+  -webkit-app-region: drag;
   border-bottom: var(--hairline);
   background: var(--white);
   position: sticky;
@@ -890,4 +890,73 @@ kbd {
 .panel code,
 .panel kbd {
   background: var(--white);
+}
+
+
+/* ---------- Window dragging ---------- */
+
+/*
+ * The window has `titleBarStyle: Overlay`, so macOS draws no bar to grab — without a
+ * declared drag region there is nowhere on the window to pick it up at all. This strip
+ * spans the top of the sidebar and doubles as the space the traffic lights sit in.
+ */
+.drag-strip {
+  height: var(--titlebar);
+  flex: none;
+  margin: 0 calc(var(--s4) * -1);
+  -webkit-app-region: drag;
+}
+
+.sidebar-title {
+  -webkit-app-region: drag;
+}
+
+.list-header {
+  -webkit-app-region: drag;
+}
+
+/* Controls inside a drag region must opt back out, or they stop being clickable. */
+.search-input,
+.detail-title,
+.detail-meta button,
+.tabs button {
+  -webkit-app-region: no-drag;
+}
+
+/* ---------- Sidebar footer ---------- */
+
+/*
+ * Settings lives at the bottom as an icon rather than in the nav list. It is visited
+ * rarely — once to add a key, once to connect a calendar — and putting it inline gave a
+ * setup screen the same weight as the recordings themselves.
+ */
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding-top: var(--s3);
+  margin-top: var(--s2);
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  flex: none;
+}
+
+.icon-nav {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  color: var(--white);
+  opacity: 0.55;
+  transition: opacity 0.12s ease, background-color 0.12s ease;
+}
+
+.icon-nav:hover {
+  opacity: 1;
+  background: rgb(255 255 255 / 8%);
+}
+
+.icon-nav.active {
+  opacity: 1;
+  background: var(--sapphire);
 }

@@ -23,6 +23,9 @@ pub struct AudioProcess {
     pub is_running_output: bool,
     #[serde(default)]
     pub is_running_input: bool,
+    /// A normal windowed app rather than a daemon or agent.
+    #[serde(default)]
+    pub is_application: bool,
 }
 
 impl AudioProcess {
@@ -80,18 +83,25 @@ pub fn processes_for_app<'a>(
         .collect()
 }
 
-/// Apps currently producing sound, one entry per app rather than one per helper process.
+/// Apps the user can choose to record, one entry per app rather than one per helper
+/// process.
 ///
-/// This is what the user picks from. Sorted by name so the list does not reshuffle
-/// between refreshes.
+/// Every real application is listed, not just the ones currently making noise. You pick
+/// what to record *before* the meeting starts, and at that moment the meeting app is
+/// silent — filtering to "currently playing" left the picker empty exactly when it was
+/// needed. `is_playing` is reported so the UI can mark the ones already making sound.
+///
+/// Daemons and background agents are excluded: `cloudpaird` is not something anyone
+/// means to record.
 pub fn audible_apps(processes: &[AudioProcess]) -> Vec<AudibleApp> {
     let mut apps: Vec<AudibleApp> = Vec::new();
 
-    for process in processes.iter().filter(|p| p.is_running_output) {
+    for process in processes.iter().filter(|p| p.is_application || p.is_running_output) {
         let key = process.app_key();
         match apps.iter_mut().find(|app| app.key == key) {
             Some(app) => {
                 app.pids.push(process.pid);
+                app.is_playing |= process.is_running_output;
                 // A helper process usually has no useful name; prefer any real one.
                 if app.name.is_empty() {
                     app.name = process.display_name();
@@ -102,11 +112,17 @@ pub fn audible_apps(processes: &[AudioProcess]) -> Vec<AudibleApp> {
                 name: process.display_name(),
                 bundle_id: process.bundle_id.clone(),
                 pids: vec![process.pid],
+                is_playing: process.is_running_output,
             }),
         }
     }
 
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    // Apps already making sound first — usually the one you want — then alphabetical.
+    apps.sort_by(|a, b| {
+        b.is_playing
+            .cmp(&a.is_playing)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     apps
 }
 
@@ -117,6 +133,8 @@ pub struct AudibleApp {
     pub name: String,
     pub bundle_id: Option<String>,
     pub pids: Vec<i32>,
+    /// Making sound right now.
+    pub is_playing: bool,
 }
 
 #[cfg(test)]
@@ -131,6 +149,7 @@ mod tests {
             name: name.map(String::from),
             is_running_output: output,
             is_running_input: false,
+            is_application: true,
         }
     }
 
@@ -179,9 +198,33 @@ mod tests {
         assert_eq!(chrome.pids, vec![101]);
     }
 
+    /// You choose what to record before the meeting starts, when the app is still
+    /// silent. Offering only what is already playing left the picker empty.
     #[test]
-    fn silent_processes_are_not_offered_as_recordable() {
+    fn a_silent_app_is_still_offered_so_it_can_be_chosen_in_advance() {
         let processes = vec![process(100, Some("com.apple.Safari"), Some("Safari"), false)];
-        assert!(audible_apps(&processes).is_empty());
+        let apps = audible_apps(&processes);
+        assert_eq!(apps.len(), 1);
+        assert!(!apps[0].is_playing);
+    }
+
+    #[test]
+    fn apps_already_making_sound_are_listed_first() {
+        let mut quiet = process(100, Some("com.apple.Safari"), Some("Safari"), false);
+        quiet.is_application = true;
+        let mut loud = process(101, Some("com.zoom.xos"), Some("Zoom"), true);
+        loud.is_application = true;
+
+        let apps = audible_apps(&[quiet, loud]);
+        assert_eq!(apps[0].name, "Zoom", "the app making sound should be first");
+        assert!(apps[0].is_playing);
+    }
+
+    /// Daemons register with Core Audio too, and nobody means to record `cloudpaird`.
+    #[test]
+    fn background_daemons_are_not_offered() {
+        let mut daemon = process(50, Some("com.apple.cloudpaird"), Some("cloudpaird"), false);
+        daemon.is_application = false;
+        assert!(audible_apps(&[daemon]).is_empty());
     }
 }

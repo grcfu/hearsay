@@ -203,7 +203,13 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-title">Hearsay</div>
+      {/* The title bar is transparent (titleBarStyle: Overlay), so the window has no
+          chrome of its own to grab. This strip is the drag handle, and it also holds the
+          space the traffic lights sit in. */}
+      <div className="drag-strip" data-tauri-drag-region />
+      <div className="sidebar-title" data-tauri-drag-region>
+        Hearsay
+      </div>
 
       <div className="sidebar-section">
         {recording ? (
@@ -306,23 +312,6 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
         </p>
       </div>
 
-      <nav className="sidebar-section" aria-label="Views">
-        <button
-          type="button"
-          className={`nav-item${view === "recordings" ? " active" : ""}`}
-          onClick={() => onViewChange("recordings")}
-        >
-          Recordings
-        </button>
-        <button
-          type="button"
-          className={`nav-item${view === "settings" ? " active" : ""}`}
-          onClick={() => onViewChange("settings")}
-        >
-          Settings
-        </button>
-      </nav>
-
       <div className="sidebar-section">
         <div className="sidebar-label">Record from</div>
         <select
@@ -334,7 +323,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
           <option value="">Everything the machine plays</option>
           {apps.map((app) => (
             <option key={app.key} value={app.key}>
-              {app.name}
+              {app.is_playing ? `${app.name} — playing now` : app.name}
             </option>
           ))}
         </select>
@@ -344,7 +333,57 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
             : "Everything, including music playing alongside."}
         </p>
       </div>
+
+      {/* Pushes the footer to the bottom of the sidebar. */}
+      <div className="spacer" />
+
+      <nav className="sidebar-footer" aria-label="Views">
+        <button
+          type="button"
+          className={`icon-nav${view === "recordings" ? " active" : ""}`}
+          onClick={() => onViewChange("recordings")}
+          title="Recordings"
+          aria-label="Recordings"
+        >
+          <RecordingsIcon />
+        </button>
+        <button
+          type="button"
+          className={`icon-nav${view === "settings" ? " active" : ""}`}
+          onClick={() => onViewChange("settings")}
+          title="Settings"
+          aria-label="Settings"
+        >
+          <SettingsIcon />
+        </button>
+      </nav>
     </aside>
+  );
+}
+
+/* Icons are inline SVG: no icon font to load, nothing fetched, and they inherit the
+   current colour so the active state needs no second asset. */
+
+function RecordingsIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden>
+      <rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M5 6.5h6M5 9.5h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="2.3" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M8 1.6v1.6M8 12.8v1.6M14.4 8h-1.6M3.2 8H1.6M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1M12.5 12.5l-1.1-1.1M4.6 4.6L3.5 3.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

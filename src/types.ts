@@ -20,6 +20,7 @@ export interface AudibleApp {
   name: string;
   bundle_id: string | null;
   pids: number[];
+  is_playing: boolean;
 }
 
 export interface HearsayEvent {

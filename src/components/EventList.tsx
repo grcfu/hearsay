@@ -57,7 +57,7 @@ export function EventList({ selectedId, onSelect, refreshToken }: Props) {
 
   return (
     <section className="event-list">
-      <div className="list-header">
+      <div className="list-header" data-tauri-drag-region>
         <input
           className="search-input"
           type="search"

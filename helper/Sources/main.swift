@@ -209,24 +209,32 @@ func checkPermission(_ options: Options) {
     print(granted ? "granted" : "denied")
 }
 
-/// Refuses to start a recording that cannot possibly contain audio.
-func requirePermission() throws {
-    guard AudioCapturePermission.preflight() else {
-        emit(
-            "error",
-            [
-                "kind": "permission_denied",
-                "message": "system audio capture is not permitted",
-            ])
-        log(AudioCapturePermission.instructions)
-        throw HelperError.permissionDenied
-    }
+/// Warns — loudly — when permission looks missing, but does not refuse to record.
+///
+/// The preflight is a signal, not proof. It answers on behalf of the *responsible*
+/// process, which for a helper spawned by an app is the app, and that attribution is not
+/// always what you would expect. Treating a negative as fatal meant a false negative
+/// blocked recording outright on a machine where capture worked fine.
+///
+/// So the order of trust is: try to record, and let the thing that can actually tell —
+/// whether non-zero samples arrive while audio is provably playing — be the judge. That
+/// check already exists and already reports. This one only sets expectations.
+func warnIfPermissionLooksMissing() {
+    guard !AudioCapturePermission.preflight() else { return }
+    emit(
+        "permission_warning",
+        [
+            "kind": "permission_denied",
+            "message": "macOS reports that system audio capture is not permitted. "
+                + "Recording will continue; if it captures only silence, this is why.",
+        ])
+    log(AudioCapturePermission.instructions)
 }
 
 // MARK: - Capture
 
 func capture(_ options: Options) throws {
-    try requirePermission()
+    warnIfPermissionLooksMissing()
 
     let target = try resolveTarget(options)
     let session = CaptureSession()

@@ -4,6 +4,7 @@
 //! `hearsay-audio` or `hearsay-core`.
 
 mod commands;
+mod permission;
 mod shortcuts;
 mod state;
 mod tray;

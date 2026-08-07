@@ -33,17 +33,10 @@ pub fn system_status() -> SystemStatus {
         Err(error) => (false, None, Some(error.to_string())),
     };
 
-    let audio_permission = if helper_available {
-        match helper::permission_granted() {
-            Ok(granted) => granted,
-            Err(error) => {
-                problem.get_or_insert(error.to_string());
-                false
-            }
-        }
-    } else {
-        false
-    };
+    // Asked in this process, not through the helper: TCC answers for the responsible
+    // process, so a subprocess reports on whatever launched Hearsay instead of on
+    // Hearsay itself.
+    let audio_permission = crate::permission::granted();
 
     SystemStatus {
         helper_available,
@@ -60,7 +53,7 @@ pub fn system_status() -> SystemStatus {
 /// stored answer and the UI has to send them to System Settings instead.
 #[tauri::command]
 pub fn request_audio_permission() -> CommandResult<bool> {
-    Ok(helper::request_permission()?)
+    Ok(crate::permission::request())
 }
 
 /// Apps currently making sound, which is what the user picks from before recording.
