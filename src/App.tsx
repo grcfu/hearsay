@@ -59,6 +59,9 @@ export function App() {
         selectedId={selectedId}
         onSelect={(id, at) => {
           setSelectedId(id);
+          // Picking a recording means you want to look at it. Leaving Settings up while
+          // the selection changed behind it made the click look like it did nothing.
+          setView("recordings");
           // A new object identity each time, so clicking the same search hit twice
           // still seeks rather than being swallowed as "no change".
           setSeekMs(at ?? null);

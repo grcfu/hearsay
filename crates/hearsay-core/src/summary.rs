@@ -32,9 +32,14 @@ const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-/// Gemini model used for summaries. Fast and inexpensive, and this is a summarising
-/// task rather than a reasoning one.
-pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
+/// Gemini model used for summaries.
+///
+/// An alias rather than a version number, deliberately. `gemini-2.5-flash` was pinned
+/// here and stopped being available to new keys within weeks — Google retires numbered
+/// models faster than a local-first app gets rebuilt. `gemini-flash-latest` is
+/// maintained by Google to point at the current Flash model, so it cannot rot the same
+/// way. Flash rather than Pro because this is summarising, not reasoning.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
 
 /// Generous, because thinking tokens count against this ceiling and a truncated summary
 /// is worse than a slow one.
@@ -301,6 +306,13 @@ fn summarize_gemini(transcript: &str, model: &str) -> Result<Summary> {
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("no detail given");
+        if status.as_u16() == 404 {
+            return Err(anyhow!(
+                "Gemini does not offer the model {model} to this key ({message}). \
+                 Google retires models periodically; Hearsay defaults to \
+                 `gemini-flash-latest`, which tracks the current one."
+            ));
+        }
         return Err(anyhow!("the Gemini API rejected the request ({status}): {message}"));
     }
 
