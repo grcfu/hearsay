@@ -9,6 +9,12 @@ import {
 import { formatClock } from "../format";
 import type { AudibleApp, HearsayEvent, Mode, SystemStatus, View } from "../types";
 
+/** Bar height limits. Below the minimum the controls collide; above the maximum the bar
+ *  starts eating the recordings list for no benefit. */
+const BAR_MIN = 64;
+const BAR_MAX = 132;
+const BAR_DEFAULT = 76;
+
 interface LiveStatus {
   recording: boolean;
   event_id: number | null;
@@ -103,6 +109,43 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   const [scrubbed, setScrubbed] = useState<string | null>(null);
   const [meeting, setMeeting] = useState<{ id: string; title: string } | null>(null);
   const [dismissedSilence, setDismissedSilence] = useState(false);
+
+  // Bar height is the user's to set. Persisted, because re-adjusting it on every launch
+  // would make it a fidget rather than a preference.
+  const [barHeight, setBarHeight] = useState<number>(() => {
+    const saved = Number(window.localStorage.getItem("hearsay.barHeight"));
+    return Number.isFinite(saved) && saved >= BAR_MIN && saved <= BAR_MAX ? saved : BAR_DEFAULT;
+  });
+
+  useEffect(() => {
+    window.localStorage.setItem("hearsay.barHeight", String(barHeight));
+  }, [barHeight]);
+
+  // Drag the bottom edge. Listeners go on the window so the pointer can leave the
+  // handle mid-drag without the resize sticking.
+  const startResize = (event: React.PointerEvent) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = barHeight;
+
+    const onMove = (move: PointerEvent) => {
+      const next = Math.round(startHeight + (move.clientY - startY));
+      setBarHeight(Math.min(BAR_MAX, Math.max(BAR_MIN, next)));
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = "ns-resize";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  // Type and spacing scale with the bar so a taller bar reads as roomier rather than
+  // as the same controls with more emptiness around them. Capped well below the height
+  // ratio — text that grew as fast as the bar would look absurd at full extension.
+  const scale = 1 + ((barHeight - BAR_DEFAULT) / (BAR_MAX - BAR_DEFAULT)) * 0.35;
 
   // The calendar offers; it never starts anything. A recorder that arms itself is one
   // the user cannot trust to be off.
@@ -238,7 +281,16 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   // The title bar is transparent, so this bar doubles as the window's drag handle and
   // holds the space the traffic lights sit in.
   return (
-    <header className="topbar" data-tauri-drag-region>
+    <header
+      className="topbar"
+      data-tauri-drag-region
+      style={
+        {
+          "--topbar-h": `${barHeight}px`,
+          "--bar-scale": scale.toFixed(3),
+        } as React.CSSProperties
+      }
+    >
       <div className="brand" data-tauri-drag-region>
         Hearsay
       </div>
@@ -399,6 +451,21 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
           <SettingsIcon />
         </button>
       </nav>
+
+      {/* Drag the bottom edge to resize. Sits above the bar's own drag region, or the
+          window would move instead of the bar resizing. */}
+      <div
+        className="bar-resize"
+        onPointerDown={startResize}
+        onDoubleClick={() => setBarHeight(BAR_DEFAULT)}
+        role="separator"
+        aria-label="Resize the bar"
+        aria-orientation="horizontal"
+        aria-valuenow={barHeight}
+        aria-valuemin={BAR_MIN}
+        aria-valuemax={BAR_MAX}
+        title="Drag to resize · double-click to reset"
+      />
     </header>
   );
 }

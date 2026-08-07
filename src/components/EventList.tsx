@@ -21,15 +21,26 @@ export function EventList({ selectedId, onSelect, refreshToken }: Props) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [, setSelectedOnce] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      setEvents(await invoke<HearsayEvent[]>("list_events"));
+      const loaded = await invoke<HearsayEvent[]>("list_events");
+      setEvents(loaded);
       setError(null);
+      // Open on the newest recording rather than an empty pane. That is almost always
+      // the one being looked for, and "Nothing selected" is a wasted first screen.
+      setSelectedOnce((already) => {
+        if (!already && loaded.length > 0 && selectedId === null) {
+          onSelect(loaded[0]!.id);
+          return true;
+        }
+        return already;
+      });
     } catch (problem) {
       setError(String((problem as { message?: string })?.message ?? problem));
     }
-  }, []);
+  }, [onSelect, selectedId]);
 
   useEffect(() => {
     void load();

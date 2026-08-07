@@ -3,6 +3,8 @@
 Local-first macOS app that records meetings, transcribes them on-device, and stores them
 as searchable events. Single user, single machine, no server, no accounts, no telemetry.
 
+![Hearsay transcript view](docs/transcript.png)
+
 ## What leaves your machine
 
 Nothing, with two exceptions. Both are off until you turn them on, and both use your own
@@ -29,6 +31,11 @@ Recordings, transcripts, and audio never go anywhere.
   started. Both hotkeys work while Hearsay is in the background.
 - **Search everything** with full-text search and click-to-seek.
 - **Optional AI summaries and calendar matching.** Without them, everything else works.
+
+![Recordings grouped by day](docs/recordings.png)
+
+Recordings are grouped by day. Left channel is you, right is everyone else, and a muted
+stretch is written into the transcript rather than left as an unexplained gap.
 
 ## Requirements
 

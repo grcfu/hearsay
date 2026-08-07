@@ -7,7 +7,18 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// `~/Library/Application Support/hearsay/`, created if missing.
+///
+/// `HEARSAY_DATA_DIR` overrides it. That exists so demos and tests can run against a
+/// throwaway directory instead of the real one — writing sample recordings into
+/// somebody's actual archive to take a screenshot is not acceptable.
 pub fn data_dir() -> Result<PathBuf> {
+    if let Ok(override_dir) = std::env::var("HEARSAY_DATA_DIR") {
+        let dir = PathBuf::from(override_dir);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("could not create data directory {}", dir.display()))?;
+        return Ok(dir);
+    }
+
     let base = dirs::data_dir().context("could not resolve ~/Library/Application Support")?;
     let dir = base.join("hearsay");
     std::fs::create_dir_all(&dir)
