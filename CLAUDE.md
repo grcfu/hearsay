@@ -234,7 +234,23 @@ Three panes. No nesting, no back button.
 
 ### Typography
 
-System font stack. Sentence case everywhere. **Two weights only: 400 and 500.** Light mode first.
+Two macOS system faces, so nothing is ever fetched from a font CDN — a webfont would have
+a privacy-first recorder phoning home to render its own chrome.
+
+| Role | Face |
+|---|---|
+| Display — titles, headings, wordmark, empty states | **New York** (`ui-serif`) |
+| Interface — everything else | **Avenir Next** |
+| Timestamps, durations, hotkey hints | **SF Mono**, tabular numerals |
+
+Anything that *names a thing* is set in the serif; the interface around it is the sans.
+Section labels are small letterspaced caps, so the panes read as an index.
+
+Sentence case everywhere. **Two weights only: 400 and 500** — the serif carries emphasis
+through shape and size, never through a heavier cut. Light mode first.
+
+Spacing comes from one scale (`--s1`…`--s7`, 3–30px) and is deliberately tight: this is a
+working tool showing a lot of text at once, where airiness reads as emptiness.
 
 ---
 

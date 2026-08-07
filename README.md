@@ -50,6 +50,22 @@ Then drag `target/release/bundle/macos/Hearsay.app` to `/Applications`.
 
 To run from source instead while developing, use `npm run tauri dev`.
 
+### “Apple could not verify Hearsay is free of malware”
+
+Expected, and safe to bypass. The app is ad-hoc signed rather than notarized, because
+notarizing needs a paid Apple Developer account. macOS shows this for any app it did not
+get from the App Store or a registered developer — it is a statement about *provenance*,
+not about the code.
+
+To open it the first time:
+
+**Right-click** (or Control-click) `Hearsay.app` → **Open** → **Open** in the dialog.
+
+Double-clicking will not offer the bypass; the right-click menu is what unlocks it. You
+only do this once — macOS remembers. On recent macOS you may instead need System Settings
+→ Privacy & Security, scroll to the bottom, and click **Open Anyway** next to the message
+about Hearsay.
+
 ### On first launch
 
 macOS will ask for **Screen & System Audio Recording**. Grant it, or recordings run
@@ -66,6 +82,29 @@ you already granted one to your terminal while building.
 environment at `python/.venv` inside it. Move or delete the checkout and recording still
 works, but transcription silently stops. The venv is not bundled into the app because
 Python virtualenvs are not relocatable.
+
+## Connecting a calendar (optional)
+
+Google requires you to create your own OAuth credentials. Hearsay embeds none, so your
+calendar access runs through a client you control and can revoke at
+[myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+
+Settings → Calendar walks you through it in the app. In short:
+
+1. Create a project in [Google Cloud Console](https://console.cloud.google.com/projectcreate).
+2. Enable the **Google Calendar API**.
+3. Configure the consent screen: **External**, add your own address as a test user.
+4. **Publish the app.** ⚠️ While the status is "Testing", Google expires refresh tokens
+   after **7 days** and you would have to reconnect weekly. Publishing stops that. Google
+   then warns the app is unverified at sign-in — click **Advanced → Go to Hearsay
+   (unsafe)**. That warning is about other people trusting your app; you are the only
+   person who will use it.
+5. Credentials → Create credentials → OAuth client ID → **Desktop app**. Paste the client
+   ID and secret into Hearsay.
+
+No redirect URI to configure — Desktop clients accept `127.0.0.1` on any port, and
+Hearsay opens a local server on a random free port to catch the sign-in. Credentials and
+tokens go into the Keychain, never into the database or a file.
 
 ## Where your data lives
 

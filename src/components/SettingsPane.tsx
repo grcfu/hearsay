@@ -266,16 +266,91 @@ function CalendarSection() {
         </button>
       ) : (
         <>
-          <p className="small muted" style={{ margin: "0 0 8px" }}>
-            Create an OAuth client of type <strong>Desktop app</strong> in Google Cloud
-            Console, enable the Calendar API, and paste its details here.{" "}
-            <button
-              type="button"
-              className="link"
-              onClick={() => void openUrl("https://console.cloud.google.com/apis/credentials")}
-            >
-              Open Google Cloud Console
-            </button>
+          <p className="small muted" style={{ margin: "0 0 4px" }}>
+            Google needs you to create your own credentials. Hearsay ships none of its
+            own, so your calendar access runs through a client you control and can revoke
+            at any time. Takes about five minutes, once.
+          </p>
+
+          <ol className="steps">
+            <li>
+              <span>
+                <strong>Create a project.</strong> Sign in with the account whose calendar
+                you want to read, then use the project dropdown at the top left → New
+                project. Name it anything.
+                <button
+                  type="button"
+                  className="link step-note"
+                  onClick={() => void openUrl("https://console.cloud.google.com/projectcreate")}
+                >
+                  Open project creation →
+                </button>
+              </span>
+            </li>
+            <li>
+              <span>
+                <strong>Enable the Google Calendar API</strong> and click Enable.
+                <button
+                  type="button"
+                  className="link step-note"
+                  onClick={() =>
+                    void openUrl(
+                      "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com",
+                    )
+                  }
+                >
+                  Open the Calendar API page →
+                </button>
+              </span>
+            </li>
+            <li>
+              <span>
+                <strong>Set up the consent screen.</strong> Choose <em>External</em>, fill
+                in a name and your email, and add your own address under Test users. You
+                can skip the scopes step — Hearsay asks for what it needs at sign-in.
+                <button
+                  type="button"
+                  className="link step-note"
+                  onClick={() => void openUrl("https://console.cloud.google.com/auth/overview")}
+                >
+                  Open the consent screen →
+                </button>
+              </span>
+            </li>
+            <li>
+              <span>
+                <strong>Publish the app</strong> on that same screen.
+                <span className="step-note">
+                  This matters: while the status is “Testing”, Google expires the
+                  connection after 7 days and you would have to reconnect every week.
+                  Publishing stops that. Google will warn that the app is unverified when
+                  you sign in — click Advanced, then “Go to Hearsay (unsafe)”. The warning
+                  is about strangers trusting your app; you are the only person who will
+                  ever use it.
+                </span>
+              </span>
+            </li>
+            <li>
+              <span>
+                <strong>Create the credential.</strong> Credentials → Create credentials →
+                OAuth client ID → application type <strong>Desktop app</strong>. Copy the
+                client ID and client secret into the fields below.
+                <button
+                  type="button"
+                  className="link step-note"
+                  onClick={() => void openUrl("https://console.cloud.google.com/apis/credentials")}
+                >
+                  Open Credentials →
+                </button>
+              </span>
+            </li>
+          </ol>
+
+          <p className="callout">
+            You do <strong>not</strong> need to configure a redirect URI. Desktop clients
+            accept <code>127.0.0.1</code> on any port, which is what Hearsay uses — it
+            opens a local server on a random free port to catch the sign-in, so nothing
+            passes through a URL bar. Both values go straight into your Keychain.
           </p>
           <div className="row" style={{ marginBottom: 8 }}>
             <input

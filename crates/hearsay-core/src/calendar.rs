@@ -190,7 +190,11 @@ fn wait_for_code(server: &tiny_http::Server, expected_state: &str) -> Result<Str
         let params = query_params(&url);
 
         if let Some(error) = params.iter().find(|(key, _)| key == "error") {
-            let _ = request.respond(page("Sign-in was declined. You can close this tab."));
+            let _ = request.respond(page(
+                "Sign-in was declined",
+                "Nothing was changed. You can close this tab and try again from Hearsay.",
+                false,
+            ));
             return Err(anyhow!("Google returned an error: {}", error.1));
         }
 
@@ -202,19 +206,30 @@ fn wait_for_code(server: &tiny_http::Server, expected_state: &str) -> Result<Str
                 // Guards against another page on this machine hitting the loopback
                 // server and injecting a code from a different grant.
                 if state.as_deref() != Some(expected_state) {
-                    let _ = request.respond(page("Sign-in could not be verified."));
+                    let _ = request.respond(page(
+                        "Sign-in could not be verified",
+                        "The response did not match the request, so nothing was saved. \
+                         Close this tab and try again from Hearsay.",
+                        false,
+                    ));
                     return Err(anyhow!(
                         "the sign-in response did not match the request; nothing was saved"
                     ));
                 }
                 let _ = request.respond(page(
-                    "Hearsay is connected to your calendar. You can close this tab.",
+                    "Your calendar is connected",
+                    "You can close this tab and go back to Hearsay.",
+                    true,
                 ));
                 return Ok(code);
             }
             None => {
                 // The browser also asks for /favicon.ico; ignore anything without a code.
-                let _ = request.respond(page("Waiting for Google…"));
+                let _ = request.respond(page(
+                    "Waiting for Google",
+                    "Finish signing in and this page will update.",
+                    true,
+                ));
             }
         }
     }
@@ -225,17 +240,76 @@ fn wait_for_code(server: &tiny_http::Server, expected_state: &str) -> Result<Str
     ))
 }
 
-fn page(message: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Hearsay</title>\
-         <body style=\"font-family:-apple-system,sans-serif;background:#F5F0E9;\
-         color:#112250;display:grid;place-items:center;height:100vh;margin:0\">\
-         <p>{message}</p>"
-    );
-    tiny_http::Response::from_string(body).with_header(
+/// Renders the success page as HTML. Exists so the page can be previewed in a browser
+/// without running a whole OAuth round trip.
+#[doc(hidden)]
+pub fn __page_for_preview() -> String {
+    page_html("Your calendar is connected", "You can close this tab and go back to Hearsay.", true)
+}
+
+/// The page Google's redirect lands on.
+///
+/// Self-contained on purpose: it is served from a loopback port with no network
+/// available to it, so every style is inline and every typeface is one already on the
+/// machine. It is also the only part of Hearsay a browser ever renders, so it is set to
+/// match the app rather than looking like a debug response.
+fn page(headline: &str, detail: &str, ok: bool) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    tiny_http::Response::from_string(page_html(headline, detail, ok)).with_header(
         tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
             .expect("a literal header is always valid"),
     )
+}
+
+fn page_html(headline: &str, detail: &str, ok: bool) -> String {
+    // The app's palette, inline — this page cannot reach the stylesheet.
+    let accent = if ok { "#3C507D" } else { "#9B4A3F" };
+    let mark = if ok { "&#10003;" } else { "&#33;" };
+
+    let body = format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hearsay</title>
+<style>
+  :root {{ color-scheme: light; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; min-height: 100vh;
+    display: grid; place-items: center; padding: 8vh 24px;
+    background: #F5F0E9; color: #112250;
+    font-family: "Avenir Next", Avenir, -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }}
+  .card {{
+    background: #FFFFFF; border: 1px solid #D9CBC2; border-radius: 14px;
+    padding: 52px 56px; max-width: 560px; width: 100%; text-align: center;
+  }}
+  .mark {{
+    width: 46px; height: 46px; margin: 0 auto 26px;
+    border-radius: 50%; border: 1.5px solid {accent}; color: {accent};
+    display: grid; place-items: center; font-size: 21px; line-height: 1;
+  }}
+  h1 {{
+    font-family: ui-serif, "New York", "Iowan Old Style", Charter, Palatino, Georgia, serif;
+    font-weight: 500; font-size: 40px; line-height: 1.15;
+    letter-spacing: -0.018em; margin: 0 0 14px; text-wrap: balance;
+  }}
+  p {{ font-size: 17px; line-height: 1.55; margin: 0; color: #3C507D; text-wrap: pretty; }}
+  .rule {{ height: 1px; background: #D9CBC2; margin: 32px 0 22px; border: 0; }}
+  .foot {{ font-size: 13.5px; color: #3C507D; margin: 0; text-wrap: pretty; }}
+  .foot strong {{ color: #112250; font-weight: 500; }}
+</style></head>
+<body><main class="card">
+  <div class="mark">{mark}</div>
+  <h1>{headline}</h1>
+  <p>{detail}</p>
+  <hr class="rule">
+  <p class="foot">Read-only access to titles and times. <strong>Nothing is ever uploaded
+  to Google</strong> — no recordings, transcripts, or summaries.</p>
+</main></body></html>"#
+    );
+
+    body
 }
 
 fn exchange_code(
