@@ -564,3 +564,103 @@ textarea {
 .meter-bar.lit {
   background: var(--white);
 }
+
+/* ---------- Transcript ---------- */
+
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 760px;
+}
+
+.transcript-line {
+  display: grid;
+  grid-template-columns: 52px 48px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.transcript-line:hover {
+  background: var(--swan);
+}
+
+.transcript-line.active {
+  background: var(--swan);
+  border-color: var(--sapphire);
+}
+
+.transcript-time {
+  font-size: 12px;
+  color: var(--sapphire);
+}
+
+.speaker {
+  font-size: 12px;
+  font-weight: var(--weight-medium);
+  color: var(--sapphire);
+}
+
+.speaker-mic {
+  color: var(--royal);
+}
+
+.transcript-text {
+  line-height: 1.55;
+}
+
+/*
+ * A muted stretch is shown, never skipped. A gap with no marker would read as "nobody
+ * spoke" when in fact the microphone was off.
+ */
+.mute-marker {
+  font-size: 12px;
+  color: var(--sapphire);
+  background: var(--swan);
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin: 4px 0;
+  font-style: italic;
+}
+
+/* ---------- Summary ---------- */
+
+.summary {
+  max-width: 680px;
+  line-height: 1.6;
+}
+
+.summary h2 {
+  margin: 20px 0 6px;
+}
+
+.summary h2:first-child {
+  margin-top: 0;
+}
+
+.summary h3 {
+  margin: 16px 0 4px;
+}
+
+.summary p {
+  margin: 0 0 10px;
+}
+
+.summary ul {
+  margin: 0 0 12px;
+  padding-left: 20px;
+}
+
+.summary li {
+  margin-bottom: 4px;
+}
+
+.button.small {
+  padding: 4px 9px;
+  font-size: 12px;
+}

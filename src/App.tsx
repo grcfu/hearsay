@@ -15,6 +15,7 @@ import type { Mode, SystemStatus } from "./types";
 export function App() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [seekMs, setSeekMs] = useState<number | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
 
   // listen_only on every launch, deliberately not persisted. Whatever mode was used
@@ -50,13 +51,25 @@ export function App() {
 
       <EventList
         selectedId={selectedId}
-        onSelect={setSelectedId}
+        onSelect={(id, at) => {
+          setSelectedId(id);
+          // A new object identity each time, so clicking the same search hit twice
+          // still seeks rather than being swallowed as "no change".
+          setSeekMs(at ?? null);
+        }}
         refreshToken={refreshToken}
       />
 
       <div className="detail">
         <SetupBanner status={status} onRecheck={loadStatus} />
-        <Detail eventId={selectedId} onChanged={refresh} />
+        <Detail
+          eventId={selectedId}
+          seekMs={seekMs}
+          onChanged={() => {
+            refresh();
+            void loadStatus();
+          }}
+        />
       </div>
     </div>
   );

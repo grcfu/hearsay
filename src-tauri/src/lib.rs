@@ -46,6 +46,11 @@ pub fn run() {
             commands::recording::stop_recording,
             commands::recording::recording_status,
             commands::transcription::retranscribe,
+            commands::events::list_events,
+            commands::events::event_detail,
+            commands::events::rename_event,
+            commands::events::search_transcripts,
+            commands::events::delete_event,
         ])
         .setup(|app| {
             // Recording is driven from the window; without one there is nothing to drive
