@@ -5,6 +5,8 @@ import type { SystemStatus } from "../types";
 
 interface Settings {
   has_api_key: boolean;
+  has_gemini_key: boolean;
+  provider: string;
   data_dir: string;
   recordings_dir: string;
   models_dir: string;
@@ -45,7 +47,10 @@ export function SettingsPane({ status, onStatusChange }: Props) {
     setError(null);
     setMessage(null);
     try {
-      await invoke("save_api_key", { key: draftKey });
+      await invoke(
+        settings?.provider === "gemini" ? "save_gemini_key" : "save_api_key",
+        { key: draftKey },
+      );
       // Clear immediately: the key should not linger in a React state tree or in the
       // DOM any longer than the moment it takes to hand it over.
       setDraftKey("");
@@ -61,7 +66,7 @@ export function SettingsPane({ status, onStatusChange }: Props) {
     setError(null);
     setMessage(null);
     try {
-      await invoke("clear_api_key");
+      await invoke(settings?.provider === "gemini" ? "clear_gemini_key" : "clear_api_key");
       setMessage("Removed. Summaries are off; everything else still works.");
       await load();
       onStatusChange();
@@ -92,11 +97,24 @@ export function SettingsPane({ status, onStatusChange }: Props) {
 
           <div className="panel" style={{ marginTop: 12 }}>
             <div className="row" style={{ marginBottom: 10 }}>
-              <strong>Anthropic API key</strong>
+              <strong>Summaries are written by</strong>
               <span className="spacer" />
-              <span className="small muted">
-                {settings?.has_api_key ? "Stored in your Keychain" : "Not set"}
-              </span>
+              <div className="mode-toggle" style={{ background: "var(--shellstone)" }}>
+                {(["anthropic", "gemini"] as const).map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className={`mode-option${settings?.provider === name ? " selected" : ""}`}
+                    style={{ color: settings?.provider === name ? undefined : "var(--royal)" }}
+                    onClick={async () => {
+                      await invoke("set_summary_provider", { provider: name });
+                      await load();
+                    }}
+                  >
+                    {name === "anthropic" ? "Claude" : "Gemini"}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="row">
@@ -105,7 +123,15 @@ export function SettingsPane({ status, onStatusChange }: Props) {
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder={settings?.has_api_key ? "Replace the stored key" : "sk-ant-…"}
+                placeholder={
+                  settings?.provider === "gemini"
+                    ? settings?.has_gemini_key
+                      ? "Replace the stored Gemini key"
+                      : "AIza…"
+                    : settings?.has_api_key
+                      ? "Replace the stored Claude key"
+                      : "sk-ant-…"
+                }
                 value={draftKey}
                 onChange={(changed) => setDraftKey(changed.target.value)}
               />
@@ -117,12 +143,22 @@ export function SettingsPane({ status, onStatusChange }: Props) {
               >
                 Save
               </button>
-              {settings?.has_api_key ? (
+              {(settings?.provider === "gemini" ? settings?.has_gemini_key : settings?.has_api_key) ? (
                 <button type="button" className="button destructive" onClick={clear}>
                   Remove
                 </button>
               ) : null}
             </div>
+
+            <p className="small muted" style={{ margin: "8px 0 0" }}>
+              {settings?.provider === "gemini"
+                ? settings?.has_gemini_key
+                  ? "Gemini key stored in your Keychain."
+                  : "No Gemini key yet."
+                : settings?.has_api_key
+                  ? "Claude key stored in your Keychain."
+                  : "No Claude key yet."}
+            </p>
 
             {message ? (
               <p className="small muted" style={{ margin: "8px 0 0" }}>
@@ -140,9 +176,15 @@ export function SettingsPane({ status, onStatusChange }: Props) {
               <button
                 type="button"
                 className="link"
-                onClick={() => void openUrl("https://console.anthropic.com/settings/keys")}
+                onClick={() =>
+                  void openUrl(
+                    settings?.provider === "gemini"
+                      ? "https://aistudio.google.com/apikey"
+                      : "https://console.anthropic.com/settings/keys",
+                  )
+                }
               >
-                Get a key
+                Get a {settings?.provider === "gemini" ? "Gemini" : "Claude"} key
               </button>
             </p>
           </div>

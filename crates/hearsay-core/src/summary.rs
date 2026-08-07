@@ -28,8 +28,13 @@ const API_VERSION: &str = "2023-06-01";
 /// their summary.
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 
-/// The model used for summaries.
+/// The model used for summaries when Anthropic is the provider.
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
+
+const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// Gemini model used for summaries. Fast and inexpensive, and this is a summarising
+/// task rather than a reasoning one.
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
 
 /// Generous, because thinking tokens count against this ceiling and a truncated summary
 /// is worse than a slow one.
@@ -84,7 +89,41 @@ impl Summary {
 /// Whether summaries are available right now. The UI uses this to explain the absence of
 /// a summary rather than showing a broken button.
 pub fn is_available() -> bool {
-    secrets::has_api_key()
+    secrets::has_summary_key()
+}
+
+/// Which service generates summaries.
+///
+/// Two providers rather than one because the choice is the user's: it is their key, their
+/// account, and their data leaving the machine. Everything else in the app is identical
+/// either way — only this one call differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Anthropic,
+    Gemini,
+}
+
+impl Provider {
+    pub fn current() -> Self {
+        match secrets::summary_provider().as_str() {
+            "gemini" => Provider::Gemini,
+            _ => Provider::Anthropic,
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Provider::Anthropic => DEFAULT_MODEL,
+            Provider::Gemini => DEFAULT_GEMINI_MODEL,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "anthropic",
+            Provider::Gemini => "gemini",
+        }
+    }
 }
 
 /// Generates a summary from an event's transcript.
@@ -96,13 +135,6 @@ pub fn summarize(
     mute_spans: &[(i64, i64)],
     model: &str,
 ) -> Result<Summary> {
-    let key = secrets::api_key()?.ok_or_else(|| {
-        anyhow!(
-            "no Anthropic API key is set. Add one in settings — everything else in \
-             Hearsay works without it."
-        )
-    })?;
-
     let transcript = render_transcript(segments, mute_spans);
     if transcript.trim().is_empty() {
         return Err(anyhow!(
@@ -110,6 +142,20 @@ pub fn summarize(
              transcript"
         ));
     }
+
+    match Provider::current() {
+        Provider::Anthropic => summarize_anthropic(&transcript, model),
+        Provider::Gemini => summarize_gemini(&transcript, model),
+    }
+}
+
+fn summarize_anthropic(transcript: &str, model: &str) -> Result<Summary> {
+    let key = secrets::api_key()?.ok_or_else(|| {
+        anyhow!(
+            "no Anthropic API key is set. Add one in settings — everything else in \
+             Hearsay works without it."
+        )
+    })?;
 
     let request = serde_json::json!({
         "model": model,
@@ -199,6 +245,125 @@ pub fn summarize(
 
     serde_json::from_str::<Summary>(text)
         .context("the model's summary did not match the expected shape")
+}
+
+/// The same job against Google's Gemini API.
+///
+/// A different shape entirely — the schema lives in `generationConfig.responseSchema`,
+/// the system prompt in `systemInstruction`, and the answer comes back nested under
+/// `candidates`. Only this function knows any of that.
+fn summarize_gemini(transcript: &str, model: &str) -> Result<Summary> {
+    let key = secrets::gemini_key()?.ok_or_else(|| {
+        anyhow!(
+            "no Gemini API key is set. Add one in settings — everything else in Hearsay \
+             works without it."
+        )
+    })?;
+
+    let request = serde_json::json!({
+        "systemInstruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
+        "contents": [{
+            "role": "user",
+            "parts": [{ "text": format!(
+                "Here is the transcript of a meeting.\n\n\
+                 `You` is the person who recorded it; `Them` is everyone else.\n\n\
+                 <transcript>\n{transcript}\n</transcript>"
+            )}],
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": gemini_schema(),
+        },
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .context("could not build the HTTP client")?;
+
+    let response = client
+        .post(format!("{GEMINI_URL}/{model}:generateContent"))
+        // In the header, not the query string: a key in a URL ends up in logs.
+        .header("x-goog-api-key", &key)
+        .header("content-type", "application/json")
+        .json(&request)
+        .send()
+        .context("could not reach the Gemini API")?;
+
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .context("the Gemini API returned a response that could not be read")?;
+
+    if !status.is_success() {
+        let message = body
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("no detail given");
+        return Err(anyhow!("the Gemini API rejected the request ({status}): {message}"));
+    }
+
+    let candidate = body
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|list| list.first())
+        .ok_or_else(|| anyhow!("Gemini returned no summary"))?;
+
+    // Same reason as the Anthropic path: find out why it stopped before reading content.
+    match candidate.get("finishReason").and_then(serde_json::Value::as_str) {
+        Some("SAFETY") | Some("PROHIBITED_CONTENT") => {
+            return Err(anyhow!(
+                "Gemini declined to summarise this recording. The transcript and audio \
+                 are untouched."
+            ))
+        }
+        Some("MAX_TOKENS") => {
+            return Err(anyhow!(
+                "the summary was cut short because the recording is very long."
+            ))
+        }
+        _ => {}
+    }
+
+    let text = candidate
+        .get("content")
+        .and_then(|content| content.get("parts"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|parts| parts.first())
+        .and_then(|part| part.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("Gemini returned no summary text"))?;
+
+    serde_json::from_str::<Summary>(text)
+        .context("Gemini's summary did not match the expected shape")
+}
+
+/// The same fields as [`schema`], in the dialect Gemini accepts.
+///
+/// Gemini uses uppercase type names and rejects `additionalProperties`, so the schema
+/// cannot simply be shared between the two providers.
+fn gemini_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "OBJECT",
+        "properties": {
+            "title": { "type": "STRING" },
+            "summary_md": { "type": "STRING" },
+            "action_items": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "text": { "type": "STRING" },
+                        "owner": { "type": "STRING", "enum": ["you", "them", "unassigned"] },
+                    },
+                    "required": ["text", "owner"],
+                },
+            },
+        },
+        "required": ["title", "summary_md", "action_items"],
+        "propertyOrdering": ["title", "summary_md", "action_items"],
+    })
 }
 
 fn schema() -> serde_json::Value {

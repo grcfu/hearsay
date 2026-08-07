@@ -5,7 +5,7 @@
 //! derived: regenerating one never touches the transcript or the audio.
 
 use crate::state::{AppState, CommandError, CommandResult};
-use hearsay_core::summary::{self, DEFAULT_MODEL};
+use hearsay_core::summary::{self, Provider};
 use hearsay_core::Database;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -61,12 +61,14 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64) {
             .map(|span| (span.start_ms, span.end_ms))
             .collect();
 
-        let summary = summary::summarize(&segments, &spans, DEFAULT_MODEL)?;
+        // Each provider names its own model; the caller does not choose one.
+        let model = Provider::current().default_model();
+        let summary = summary::summarize(&segments, &spans, model)?;
         db.set_summary(
             event_id,
             &summary.to_markdown(),
             Some(summary.title.as_str()),
-            DEFAULT_MODEL,
+            model,
         )?;
         Ok(())
     })();

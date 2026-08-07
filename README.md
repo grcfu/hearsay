@@ -10,7 +10,8 @@ as searchable events. Single user, single machine, no server, no accounts, no te
 Nothing, with two exceptions. Both are off until you turn them on, and both use your own
 credentials:
 
-1. **AI summaries** — only when you press the button, using your Anthropic API key.
+1. **AI summaries** — only when you press the button, using your own API key. Claude or
+   Gemini, whichever you prefer.
 2. **Google Calendar** — only if you connect it. Read-only, titles and times only.
    Nothing is ever uploaded to Google.
 

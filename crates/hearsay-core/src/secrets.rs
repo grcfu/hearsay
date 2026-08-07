@@ -14,6 +14,11 @@ const SERVICE: &str = "com.hearsay.app";
 /// Account name within the service.
 const ACCOUNT: &str = "anthropic-api-key";
 
+/// Which model provider generates summaries: "anthropic" or "gemini".
+const PROVIDER: &str = "summary-provider";
+/// Google Gemini API key.
+const GEMINI_KEY: &str = "gemini-api-key";
+
 /// Google OAuth client details, supplied by the user.
 const CALENDAR_CLIENT: &str = "google-calendar-client";
 /// Google OAuth tokens. Refresh tokens are long-lived credentials and belong in the
@@ -51,6 +56,34 @@ fn remove(account: &str) -> Result<()> {
             "could not remove {account} from the Keychain: {error}"
         )),
     }
+}
+
+/// The chosen summary provider, defaulting to Anthropic.
+pub fn summary_provider() -> String {
+    read(PROVIDER)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "anthropic".to_string())
+}
+
+pub fn set_summary_provider(value: &str) -> Result<()> {
+    write(PROVIDER, value)
+}
+
+pub fn gemini_key() -> Result<Option<String>> {
+    read(GEMINI_KEY)
+}
+
+pub fn set_gemini_key(key: &str) -> Result<()> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("an empty key cannot be saved");
+    }
+    write(GEMINI_KEY, trimmed)
+}
+
+pub fn clear_gemini_key() -> Result<()> {
+    remove(GEMINI_KEY)
 }
 
 /// The user's Google OAuth client details, as stored JSON.
@@ -108,9 +141,21 @@ pub fn api_key() -> Result<Option<String>> {
     }
 }
 
-/// Whether a key is stored. This is all the frontend is ever told.
+/// Whether an Anthropic key is stored. This is all the frontend is ever told.
 pub fn has_api_key() -> bool {
     matches!(api_key(), Ok(Some(_)))
+}
+
+pub fn has_gemini_key() -> bool {
+    matches!(gemini_key(), Ok(Some(_)))
+}
+
+/// Whether summaries can run at all — whichever provider is selected has a key.
+pub fn has_summary_key() -> bool {
+    match summary_provider().as_str() {
+        "gemini" => has_gemini_key(),
+        _ => has_api_key(),
+    }
 }
 
 /// Removes the key. Removing a key that is not there succeeds.

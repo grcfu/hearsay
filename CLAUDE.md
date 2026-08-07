@@ -11,7 +11,8 @@ These are not preferences. Violating any of them is a bug, even if the app still
 
 - **Nothing leaves the machine** except two named, opt-in exceptions, both using the
   user's own credentials:
-  1. **LLM summary calls**, made only when the user asks for a summary.
+  1. **LLM summary calls** (Anthropic or Gemini), made only when the user asks for a
+     summary.
   2. **Google Calendar reads** (§11), when the user connects a calendar — read-only,
      titles and times only, and nothing is ever uploaded.
 
@@ -201,7 +202,10 @@ FTS5 over `segments.text`.
 
 ## 9. Secrets
 
-Anthropic API key lives in the **macOS Keychain** via the `keyring` crate.
+Summary API keys live in the **macOS Keychain** via the `keyring` crate. Either
+**Anthropic** or **Google Gemini** — the user picks, since it is their key and their
+account the text is sent to. Only the summary call differs between them; everything else
+in the app is identical either way, and both remain optional.
 
 Never a `.env`. Never in SQLite. Never in a log line. Never in an error message.
 
