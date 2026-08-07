@@ -33,6 +33,31 @@ Recordings, transcripts, and audio never go anywhere.
 - **Search everything** with full-text search and click-to-seek.
 - **Optional AI summaries and calendar matching.** Without them, everything else works.
 
+### Summaries
+
+Off until you add a key, and the only feature that sends anything anywhere. Claude or
+Gemini — your key, your account, your choice.
+
+The prompt is deliberately opinionated, and it lives in one editable string in
+`crates/hearsay-core/src/summary.rs`:
+
+- **Bullets under headings named after the actual conversation**, not a fixed template. A
+  recruiting session gets "The role" and "How to apply"; a coffee chat gets "About Dana"
+  and "Advice she gave".
+- **A closing "Worth remembering"** for what is easy to lose — names, roles, deadlines,
+  numbers, and the personal details worth having before a follow-up.
+- **Action items are a separate schema field**, with an owner of you / them / unassigned.
+  Never a guessed name.
+- **Nothing invented.** Undecided stays undecided, garbled stays out, and a muted stretch
+  is passed to the model as a gap it is told not to speculate about.
+
+Set your name in Settings and summaries address you by it instead of "you". **Copy
+summary** puts formatted text and markdown on the clipboard together, so it pastes as real
+headings and bullets into Google Docs and as markdown into a text editor.
+
+Summaries are derived, never source: they regenerate from the stored transcript without
+re-transcribing, and regenerating never overwrites a title you typed yourself.
+
 ![Recordings grouped by day, showing a listen-only lecture](docs/recordings.png)
 
 Recordings are grouped by day. In `conversation` mode the left channel is you and the
@@ -62,10 +87,11 @@ To run from source instead while developing, use `npm run tauri dev`.
 
 ### “Apple could not verify Hearsay is free of malware”
 
-Expected, and safe to bypass. The app is ad-hoc signed rather than notarized, because
-notarizing needs a paid Apple Developer account. macOS shows this for any app it did not
-get from the App Store or a registered developer — it is a statement about *provenance*,
-not about the code.
+Expected, and safe to bypass. Hearsay is not notarized, because notarizing needs a paid
+Apple Developer account. (`install.sh` does sign it — with a free Apple Development
+certificate when it finds one, ad-hoc otherwise — but signing is not notarization.) macOS
+shows this for any app it did not get from the App Store or a registered developer. It is
+a statement about *provenance*, not about the code.
 
 To open it the first time:
 
@@ -78,10 +104,12 @@ about Hearsay.
 
 ### On first launch
 
-macOS will ask for **Screen & System Audio Recording**. Grant it, or recordings run
-normally and capture nothing but silence — Hearsay detects this and refuses to start
-rather than writing a silent file. **Microphone** is requested separately, and only the
-first time you use conversation mode.
+macOS will ask for **Screen & System Audio Recording**. Grant it — without it a tap runs
+and captures nothing but silence, which is the characteristic way audio capture fails.
+Hearsay watches for it: if a minute goes by with audio playing and every captured sample
+still zero, it says so during the recording rather than letting you find out afterwards.
+**Microphone** is requested separately, and only the first time you use conversation
+mode.
 
 Permissions are tied to code identity, so the installed app needs its own grant even if
 you already granted one to your terminal while building.
@@ -192,9 +220,8 @@ Everything is in `~/Library/Application Support/hearsay/` — the SQLite databas
 ## Current limits
 
 - **Apple Silicon only.** No Intel build.
-- **Not notarized.** The app is ad-hoc signed, so on a Mac other than the one that built
-  it, Gatekeeper blocks it until you right-click → Open. Proper signing needs an Apple
-  Developer account.
+- **Not notarized.** On a Mac other than the one that built it, Gatekeeper blocks the app
+  until you right-click → Open. Notarizing needs a paid Apple Developer account.
 - **Transcription needs the checkout**, as above. There is no self-contained installer.
 
 ## Development
