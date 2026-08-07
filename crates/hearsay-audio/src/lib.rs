@@ -10,10 +10,12 @@
 pub mod helper;
 pub mod process;
 pub mod source;
+pub mod wav;
 
 pub use helper::{HelperEvent, HelperSource, HelperStatus, TapTarget};
 pub use process::{AudibleApp, AudioProcess};
 pub use source::{AudioFormat, AudioSource, Chunk};
+pub use wav::WavWriter;
 
 use thiserror::Error;
 
