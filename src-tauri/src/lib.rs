@@ -42,6 +42,10 @@ pub fn run() {
             commands::system::system_status,
             commands::system::request_audio_permission,
             commands::system::list_audible_apps,
+            commands::recording::start_recording,
+            commands::recording::stop_recording,
+            commands::recording::recording_status,
+            commands::transcription::retranscribe,
         ])
         .setup(|app| {
             // Recording is driven from the window; without one there is nothing to drive

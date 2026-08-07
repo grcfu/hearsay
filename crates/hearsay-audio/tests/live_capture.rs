@@ -121,3 +121,41 @@ fn a_process_making_no_sound_yields_no_audio() {
         "a silent process leaked {nonzero} non-zero samples — scoping is not working"
     );
 }
+
+/// End-to-end: a listen-only session produces a playable WAV with real audio in it.
+#[test]
+#[ignore = "needs the helper built, permission granted, and audio playing"]
+fn a_listen_only_session_writes_a_playable_wav() {
+    use hearsay_audio::{Mode, Recording};
+
+    let path = std::env::temp_dir().join(format!("hearsay-session-{}.wav", std::process::id()));
+    let recording = Recording::start(Mode::ListenOnly, TapTarget::SystemWide, &path)
+        .expect("recording should start");
+
+    std::thread::sleep(Duration::from_secs(5));
+    let status = recording.status();
+    println!("mid-session: {status:?}");
+
+    let outcome = recording.stop().expect("recording should stop cleanly");
+    println!(
+        "wrote {} frames ({} ms) to {}",
+        outcome.frames,
+        outcome.duration_ms,
+        outcome.path.display()
+    );
+
+    assert!(outcome.frames > 0, "no audio was written");
+    assert!(
+        outcome.produced_audio,
+        "the session wrote {} frames and every one was silent",
+        outcome.frames
+    );
+
+    // Listen-only is one channel: the tap's stereo is one voice, not two.
+    let reader = hound::WavReader::open(&path).expect("the file should be a readable wav");
+    assert_eq!(reader.spec().channels, 1);
+    assert_eq!(reader.spec().sample_rate, outcome.format.sample_rate);
+    assert!(reader.len() > 0, "the wav header reports no samples");
+
+    let _ = std::fs::remove_file(&path);
+}

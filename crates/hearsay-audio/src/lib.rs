@@ -8,12 +8,15 @@
 //! boundary are expected to wrap them in `anyhow`.
 
 pub mod helper;
+pub mod mix;
 pub mod process;
+pub mod recorder;
 pub mod source;
 pub mod wav;
 
 pub use helper::{HelperEvent, HelperSource, HelperStatus, TapTarget};
 pub use process::{AudibleApp, AudioProcess};
+pub use recorder::{Recording, RecordingOutcome, RecordingStatus};
 pub use source::{AudioFormat, AudioSource, Chunk};
 pub use wav::WavWriter;
 

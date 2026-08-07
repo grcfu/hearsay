@@ -4,17 +4,47 @@
 //! translates between Tauri's world and `hearsay-core`. Business logic that ends up here
 //! belongs in a crate instead.
 
+use hearsay_audio::Recording;
 use hearsay_core::Database;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// The session currently being recorded, if any.
+pub struct ActiveRecording {
+    pub event_id: i64,
+    pub recording: Recording,
+}
 
 /// Everything the commands need. Held by Tauri and shared across invocations.
 pub struct AppState {
     pub db: Arc<Database>,
+    /// At most one recording runs at a time. Two would fight over the same tap.
+    recording: Mutex<Option<ActiveRecording>>,
 }
 
 impl AppState {
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        Self {
+            db,
+            recording: Mutex::new(None),
+        }
+    }
+
+    /// Takes the recording lock, turning a poisoned mutex into a reportable error rather
+    /// than a second panic.
+    pub fn lock_recording(&self) -> CommandResult<MutexGuard<'_, Option<ActiveRecording>>> {
+        self.recording.lock().map_err(|_| CommandError {
+            message: "the recorder is in an unknown state after an earlier failure. \
+                      Restart Hearsay; any audio already written is safe on disk."
+                .to_string(),
+        })
+    }
+
+    /// Whether a recording is running, without holding the lock open.
+    pub fn is_recording(&self) -> bool {
+        self.recording
+            .lock()
+            .map(|active| active.is_some())
+            .unwrap_or(false)
     }
 }
 
