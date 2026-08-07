@@ -399,8 +399,14 @@ function SummaryTab({
                 // description is visible to every guest on the invite, and a summary of
                 // a meeting is not always something the other attendees should read.
                 // Copying leaves that judgement with the person who was there.
+                //
+                // Two flavours go on the clipboard at once, and the destination picks.
+                // Google Docs, Word and Notion take the HTML and paste real headings and
+                // bullets; a text editor or a terminal takes the markdown. One button, no
+                // choice to make, and nothing lost either way.
+                const markdown = event.summary_md ?? "";
                 try {
-                  await navigator.clipboard.writeText(event.summary_md ?? "");
+                  await copyRichText(summaryToHtml(markdown), markdown);
                   setCopied(true);
                   window.setTimeout(() => setCopied(false), 2500);
                 } catch {
@@ -414,7 +420,7 @@ function SummaryTab({
               {running ? "Regenerating…" : "Regenerate"}
             </button>
             <span className="small muted">
-              Rewritten from the transcript. The recording is not touched.
+              Pastes with formatting into Docs, and as markdown into a text editor.
               {event.model_used ? ` Last written by ${event.model_used}.` : ""}
             </span>
           </div>
@@ -501,6 +507,89 @@ function AudioTab({
  * appear would be more dependency than the job needs — and this renders text nodes, so
  * nothing in a summary can inject markup.
  */
+/// Puts formatted and plain versions of the same text on the clipboard together.
+///
+/// Falls back to plain text where `ClipboardItem` is missing, so the button always does
+/// something rather than failing on the fancier path.
+async function copyRichText(html: string, plain: string): Promise<void> {
+  if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([plain], { type: "text/plain" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // Fall through: some paste targets reject multi-flavour writes.
+    }
+  }
+  await navigator.clipboard.writeText(plain);
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function inlineToHtml(text: string): string {
+  return text
+    .split(/(\*\*[^*]+\*\*)/g)
+    .map((part) =>
+      part.startsWith("**") && part.endsWith("**") && part.length > 4
+        ? `<strong>${escapeHtml(part.slice(2, -2))}</strong>`
+        : escapeHtml(part),
+    )
+    .join("");
+}
+
+/// The same grammar [`renderMarkdown`] understands, emitted as HTML for the clipboard.
+///
+/// Inline styles as well as semantic tags: some editors map `<h2>` to their own heading
+/// style and ignore everything else, and some do the opposite.
+function summaryToHtml(markdown: string): string {
+  const out: string[] = [];
+  let bullets: string[] = [];
+
+  const flushBullets = () => {
+    if (bullets.length === 0) return;
+    out.push(
+      `<ul>${bullets.map((item) => `<li>${inlineToHtml(item)}</li>`).join("")}</ul>`,
+    );
+    bullets = [];
+  };
+
+  for (const raw of markdown.split("\n")) {
+    const line = raw.trimEnd();
+    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (bullet?.[1] !== undefined) {
+      bullets.push(bullet[1]);
+      continue;
+    }
+    flushBullets();
+
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (heading?.[1] && heading[2] !== undefined) {
+      const tag = heading[1].length <= 2 ? "h2" : "h3";
+      const size = tag === "h2" ? "17pt" : "14pt";
+      out.push(
+        `<${tag} style="font-size:${size};font-weight:600;margin:16px 0 6px">` +
+          `${inlineToHtml(heading[2])}</${tag}>`,
+      );
+      continue;
+    }
+
+    if (line.trim() === "") continue;
+    out.push(`<p style="margin:0 0 8px">${inlineToHtml(line)}</p>`);
+  }
+  flushBullets();
+
+  return `<div>${out.join("")}</div>`;
+}
+
 function renderMarkdown(markdown: string): React.ReactNode {
   const blocks: React.ReactNode[] = [];
   const lines = markdown.split("\n");
