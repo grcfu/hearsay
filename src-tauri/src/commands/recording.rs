@@ -44,7 +44,11 @@ fn parse_mode(raw: &str) -> CommandResult<Mode> {
 }
 
 #[tauri::command]
-pub fn start_recording(state: State<'_, AppState>, request: StartRequest) -> CommandResult<Event> {
+pub fn start_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: StartRequest,
+) -> CommandResult<Event> {
     let mode = parse_mode(&request.mode)?;
 
     let mut active = state.lock_recording()?;
@@ -88,6 +92,8 @@ pub fn start_recording(state: State<'_, AppState>, request: StartRequest) -> Com
         event_id,
         recording,
     });
+    drop(active);
+    crate::tray::refresh(&app);
 
     state
         .db
@@ -135,6 +141,17 @@ pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> CommandResu
     let outcome = session.recording.stop()?;
 
     state.db.finish_event(event_id, Utc::now())?;
+
+    // Every muted stretch is persisted so the transcript can say so out loud. A silent
+    // gap with no marker would read as "nobody spoke".
+    if !outcome.mute_spans.is_empty() {
+        state.db.replace_mute_spans(event_id, &outcome.mute_spans)?;
+        tracing::info!(
+            "recording {event_id} had {} muted span(s)",
+            outcome.mute_spans.len()
+        );
+    }
+    crate::tray::refresh(&app);
 
     if !outcome.produced_audio {
         // Never let this pass quietly. A file full of zeros is a failed recording, and

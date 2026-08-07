@@ -4,7 +4,9 @@
 //! `hearsay-audio` or `hearsay-core`.
 
 mod commands;
+mod shortcuts;
 mod state;
+mod tray;
 
 use hearsay_core::Database;
 use state::AppState;
@@ -36,7 +38,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    shortcuts::handle(app, shortcut, event.state());
+                })
+                .build(),
+        )
         .manage(AppState::new(db))
         .invoke_handler(tauri::generate_handler![
             commands::system::system_status,
@@ -55,6 +63,9 @@ pub fn run() {
             commands::settings::save_api_key,
             commands::settings::clear_api_key,
             commands::summary::generate_summary,
+            commands::mute::mute_state,
+            commands::mute::set_mute,
+            commands::mute::toggle_mute,
         ])
         .setup(|app| {
             // Recording is driven from the window; without one there is nothing to drive
@@ -62,6 +73,11 @@ pub fn run() {
             if app.get_webview_window("main").is_none() {
                 return Err("the main window is missing from tauri.conf.json".into());
             }
+
+            // The menu bar item and the hotkeys are what make recording controllable
+            // while the user is looking at their meeting app instead of at Hearsay.
+            tray::build(app.handle())?;
+            shortcuts::register(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

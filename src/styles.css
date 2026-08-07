@@ -671,3 +671,32 @@ textarea {
   text-decoration: underline;
   font: inherit;
 }
+
+/* ---------- Mute ---------- */
+
+.mute-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgb(255 255 255 / 8%);
+  border-color: rgb(255 255 255 / 18%);
+  color: var(--white);
+}
+
+.mute-button:hover:not(:disabled) {
+  border-color: rgb(255 255 255 / 40%);
+}
+
+/* Muting is a state, not a recording signal — sapphire, never gold. */
+.mute-button.engaged {
+  background: var(--sapphire);
+  border-color: var(--sapphire);
+}
+
+.shortcut-hint {
+  font-size: 11px;
+  opacity: 0.6;
+  font-family: var(--mono);
+}

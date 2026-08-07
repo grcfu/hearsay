@@ -5,6 +5,7 @@
 //! those behind.
 
 pub mod events;
+pub mod mute;
 pub mod recording;
 pub mod settings;
 pub mod summary;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { formatClock } from "../format";
 import type { AudibleApp, HearsayEvent, Mode, SystemStatus, View } from "../types";
 
@@ -37,6 +38,10 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   const [selectedApp, setSelectedApp] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mute, setMute] = useState<{ muted: boolean; applicable: boolean }>({
+    muted: false,
+    applicable: false,
+  });
   const pollRef = useRef<number | null>(null);
 
   const recording = live?.recording ?? false;
@@ -66,6 +71,35 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
       pollRef.current = null;
     };
   }, [recording, poll]);
+
+  // The mute hotkey works while Hearsay is in the background, so mute state arrives as
+  // an event rather than only from clicks in this window.
+  useEffect(() => {
+    const unlisten = listen<{ muted: boolean; applicable: boolean }>("mute", (message) =>
+      setMute(message.payload),
+    );
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!recording) {
+      setMute({ muted: false, applicable: false });
+      return;
+    }
+    void invoke<{ muted: boolean; applicable: boolean }>("mute_state")
+      .then(setMute)
+      .catch(() => undefined);
+  }, [recording]);
+
+  const toggleMute = async () => {
+    try {
+      setMute(await invoke<{ muted: boolean; applicable: boolean }>("toggle_mute"));
+    } catch (problem) {
+      setError(String((problem as { message?: string })?.message ?? problem));
+    }
+  };
 
   const refreshApps = useCallback(async () => {
     try {
@@ -134,6 +168,22 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
               <span className="spacer" />
               <LevelMeter peak={live?.peak ?? 0} />
             </div>
+            {mute.applicable ? (
+              <button
+                type="button"
+                className={`button mute-button${mute.muted ? " engaged" : ""}`}
+                onClick={toggleMute}
+              >
+                {mute.muted ? "Unmute microphone" : "Mute microphone"}
+                <span className="shortcut-hint">⌘⇧M</span>
+              </button>
+            ) : null}
+            {mute.muted ? (
+              <p className="small" style={{ opacity: 0.8, margin: "2px 6px 0" }}>
+                Your microphone is writing silence. The other side is still being
+                recorded, and the muted stretch is marked in the transcript.
+              </p>
+            ) : null}
             {live && !live.has_audio ? (
               <p className="small" style={{ opacity: 0.8, margin: "2px 6px 0" }}>
                 No audio captured yet. If this stays empty, the recording will be silent.
