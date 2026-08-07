@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = ["crates/hearsay-audio", "crates/hearsay-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+hearsay-audio = { path = "crates/hearsay-audio" }
+hearsay-core = { path = "crates/hearsay-core" }
+
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "6.0"
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+keyring = { version = "4.1", features = ["apple-native"] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tiny_http = "0.12"
+hound = "3.5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Recording must never be starved by a debug build. Optimise the audio path
+# even in dev builds; the app itself stays unoptimised for fast iteration.
+[profile.dev.package.hearsay-audio]
+opt-level = 2
