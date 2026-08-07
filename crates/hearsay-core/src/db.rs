@@ -52,6 +52,36 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_segments_event    ON segments(event_id, start_ms);
     CREATE INDEX idx_mute_spans_event  ON mute_spans(event_id, start_ms);
     "#,
+    // 2: full-text search over segment text.
+    //
+    // An external-content table: the index stores no copy of the text, only the terms,
+    // and reads through to `segments` for anything it needs to display. Triggers keep it
+    // in step, so nothing in the app has to remember to update the index.
+    r#"
+    CREATE VIRTUAL TABLE segments_fts USING fts5(
+        text,
+        content = 'segments',
+        content_rowid = 'id',
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
+
+    CREATE TRIGGER segments_fts_insert AFTER INSERT ON segments BEGIN
+        INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
+    END;
+
+    CREATE TRIGGER segments_fts_delete AFTER DELETE ON segments BEGIN
+        INSERT INTO segments_fts(segments_fts, rowid, text)
+            VALUES ('delete', old.id, old.text);
+    END;
+
+    CREATE TRIGGER segments_fts_update AFTER UPDATE ON segments BEGIN
+        INSERT INTO segments_fts(segments_fts, rowid, text)
+            VALUES ('delete', old.id, old.text);
+        INSERT INTO segments_fts(rowid, text) VALUES (new.id, new.text);
+    END;
+
+    INSERT INTO segments_fts(rowid, text) SELECT id, text FROM segments;
+    "#,
 ];
 
 /// A recording session and everything known about it.
@@ -399,6 +429,76 @@ impl Database {
         })
     }
 
+    // -- search ------------------------------------------------------------------
+
+    /// Full-text search across every transcript.
+    ///
+    /// Results carry enough context to render a row and jump straight to the moment:
+    /// the event, the timestamp, and a snippet with the matched terms marked.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let Some(match_expression) = to_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT s.id            AS segment_id,
+                        s.event_id      AS event_id,
+                        s.channel       AS channel,
+                        s.start_ms      AS start_ms,
+                        s.end_ms        AS end_ms,
+                        s.text          AS text,
+                        e.title         AS event_title,
+                        e.ai_title      AS event_ai_title,
+                        e.started_at    AS started_at,
+                        snippet(segments_fts, 0, '[', ']', '…', 12) AS snippet
+                   FROM segments_fts
+                   JOIN segments s ON s.id = segments_fts.rowid
+                   JOIN events   e ON e.id = s.event_id
+                  WHERE segments_fts MATCH ?1
+                  ORDER BY rank
+                  LIMIT ?2",
+            )?;
+
+            let hits = statement
+                .query_map(params![match_expression, limit as i64], |row| {
+                    let title: String = row.get("event_title")?;
+                    let ai_title: Option<String> = row.get("event_ai_title")?;
+                    Ok(SearchHit {
+                        segment_id: row.get("segment_id")?,
+                        event_id: row.get("event_id")?,
+                        event_title: if title.trim().is_empty() {
+                            ai_title.unwrap_or_else(|| "Untitled recording".to_string())
+                        } else {
+                            title
+                        },
+                        started_at: row.get("started_at")?,
+                        channel: row.get("channel")?,
+                        start_ms: row.get("start_ms")?,
+                        end_ms: row.get("end_ms")?,
+                        text: row.get("text")?,
+                        snippet: row.get("snippet")?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(hits)
+        })
+    }
+
+    /// Rebuilds the search index from the segments table.
+    ///
+    /// Nothing in normal operation needs this — the triggers keep the index current. It
+    /// exists so a suspect index can be fixed without re-transcribing anything.
+    pub fn rebuild_search_index(&self) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO segments_fts(segments_fts) VALUES ('rebuild')",
+                [],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn mute_spans(&self, event_id: i64) -> Result<Vec<MuteSpan>> {
         self.with_connection(|connection| {
             let mut statement = connection
@@ -409,6 +509,58 @@ impl Database {
             Ok(spans)
         })
     }
+}
+
+/// One search result, with enough context to render it and seek to it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub segment_id: i64,
+    pub event_id: i64,
+    pub event_title: String,
+    pub started_at: DateTime<Utc>,
+    pub channel: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    /// The matched text with `[` and `]` around the hit terms.
+    pub snippet: String,
+}
+
+/// Turns what the user typed into an FTS5 MATCH expression.
+///
+/// FTS5's query language has its own syntax, and a transcript search box is exactly
+/// where someone types an apostrophe, a colon, or a stray quote. Rather than let that
+/// become a SQL error in the user's face, every word is extracted and quoted as a
+/// literal term. The last word gets a prefix marker so results narrow as you type.
+///
+/// Returns `None` when there is nothing searchable, so callers can show an empty result
+/// instead of running a query that matches everything.
+fn to_fts_query(input: &str) -> Option<String> {
+    let words: Vec<String> = input
+        .split(|character: char| !character.is_alphanumeric() && character != '\'')
+        .filter(|word| !word.is_empty())
+        .map(|word| word.replace('"', ""))
+        .filter(|word| !word.is_empty())
+        .collect();
+
+    if words.is_empty() {
+        return None;
+    }
+
+    let last = words.len() - 1;
+    let terms: Vec<String> = words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            if index == last {
+                format!("\"{word}\"*")
+            } else {
+                format!("\"{word}\"")
+            }
+        })
+        .collect();
+
+    Some(terms.join(" "))
 }
 
 /// Applies any migrations the database has not seen yet.
@@ -572,6 +724,117 @@ mod tests {
         assert_eq!(event.title, "Design review");
         assert_eq!(event.ai_title.as_deref(), Some("Q3 planning sync"));
         assert_eq!(event.display_title(), "Design review");
+    }
+
+    fn with_transcript() -> (Database, i64) {
+        let (db, id) = seeded();
+        db.replace_segments(
+            id,
+            &[
+                NewSegment {
+                    channel: "system".into(),
+                    start_ms: 0,
+                    end_ms: 4_000,
+                    text: "We need someone to own the migration timeline".into(),
+                },
+                NewSegment {
+                    channel: "mic".into(),
+                    start_ms: 4_000,
+                    end_ms: 7_000,
+                    text: "I'll take the migration and follow up on Friday".into(),
+                },
+                NewSegment {
+                    channel: "system".into(),
+                    start_ms: 7_000,
+                    end_ms: 9_000,
+                    text: "Great, let's move on to hiring".into(),
+                },
+            ],
+        )
+        .expect("segments insert");
+        (db, id)
+    }
+
+    #[test]
+    fn search_finds_segments_by_word() {
+        let (db, id) = with_transcript();
+        let hits = db.search("migration", 20).expect("search runs");
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.event_id == id));
+        assert!(hits.iter().any(|hit| hit.channel == "mic"));
+        assert!(hits.iter().any(|hit| hit.channel == "system"));
+    }
+
+    #[test]
+    fn search_results_carry_a_seek_point_and_a_snippet() {
+        let (db, _) = with_transcript();
+        let hits = db.search("hiring", 20).expect("search runs");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].start_ms, 7_000);
+        assert!(
+            hits[0].snippet.contains('['),
+            "expected the match to be marked: {:?}",
+            hits[0].snippet
+        );
+    }
+
+    #[test]
+    fn search_narrows_as_you_type() {
+        let (db, _) = with_transcript();
+        assert!(!db.search("migr", 20).expect("search runs").is_empty());
+    }
+
+    /// The search box is where stray punctuation lands. None of it may reach FTS5 as
+    /// syntax and come back as an error.
+    #[test]
+    fn punctuation_in_a_query_is_never_a_syntax_error() {
+        let (db, _) = with_transcript();
+        for query in [
+            "\"unbalanced",
+            "migration:",
+            "NEAR(",
+            "a AND OR b",
+            "friday's",
+            "*",
+            "^",
+        ] {
+            let result = db.search(query, 20);
+            assert!(result.is_ok(), "query {query:?} failed: {result:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_query_matches_nothing_rather_than_everything() {
+        let (db, _) = with_transcript();
+        assert!(db.search("", 20).expect("search runs").is_empty());
+        assert!(db.search("   ", 20).expect("search runs").is_empty());
+        assert!(db.search("!!!", 20).expect("search runs").is_empty());
+    }
+
+    #[test]
+    fn deleted_segments_leave_the_search_index() {
+        let (db, id) = with_transcript();
+        assert!(!db.search("hiring", 20).expect("search runs").is_empty());
+
+        db.replace_segments(id, &[]).expect("segments cleared");
+        assert!(
+            db.search("hiring", 20).expect("search runs").is_empty(),
+            "the index still returns text that is no longer stored"
+        );
+    }
+
+    #[test]
+    fn deleting_an_event_removes_its_text_from_search() {
+        let (db, id) = with_transcript();
+        db.delete_event(id).expect("delete works");
+        assert!(db.search("migration", 20).expect("search runs").is_empty());
+    }
+
+    #[test]
+    fn rebuilding_the_index_preserves_results() {
+        let (db, _) = with_transcript();
+        db.rebuild_search_index().expect("rebuild works");
+        assert_eq!(db.search("migration", 20).expect("search runs").len(), 2);
     }
 
     #[test]
