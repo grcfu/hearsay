@@ -143,6 +143,7 @@ name = "hearsay-audio"
 version = "0.1.0"
 dependencies = [
  "hound",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

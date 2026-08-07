@@ -7,6 +7,14 @@
 //! Errors in this crate are concrete ([`AudioError`]); callers at the application
 //! boundary are expected to wrap them in `anyhow`.
 
+pub mod helper;
+pub mod process;
+pub mod source;
+
+pub use helper::{HelperEvent, HelperSource, HelperStatus, TapTarget};
+pub use process::{AudibleApp, AudioProcess};
+pub use source::{AudioFormat, AudioSource, Chunk};
+
 use thiserror::Error;
 
 /// Everything that can go wrong in the audio path.
