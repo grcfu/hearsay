@@ -25,8 +25,11 @@ dirs = "6.0"
 rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
 keyring = { version = "4.1", features = ["apple-native-keyring-store"] }
 reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "charset",
+    "http2",
     "json",
-    "rustls-tls",
+    "rustls",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tiny_http = "0.12"

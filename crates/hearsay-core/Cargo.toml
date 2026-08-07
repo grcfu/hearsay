@@ -19,3 +19,4 @@ uuid.workspace = true
 dirs.workspace = true
 rusqlite.workspace = true
 keyring.workspace = true
+reqwest.workspace = true

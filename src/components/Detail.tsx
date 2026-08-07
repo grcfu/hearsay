@@ -200,7 +200,14 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
         <TranscriptionProgress progress={progress} />
 
         {tab === "summary" ? (
-          <SummaryTab event={event} segmentCount={segments.length} />
+          <SummaryTab
+            event={event}
+            segmentCount={segments.length}
+            onChanged={() => {
+              void load();
+              onChanged();
+            }}
+          />
         ) : tab === "transcript" ? (
           <Transcript
             segments={segments}
@@ -266,23 +273,91 @@ function TranscriptionProgress({ progress }: { progress: TranscriptionEvent | nu
 function SummaryTab({
   event,
   segmentCount,
+  onChanged,
 }: {
   event: HearsayEvent;
   segmentCount: number;
+  onChanged: () => void;
 }) {
-  if (!event.summary_md) {
-    return (
-      <div className="panel">
-        <p style={{ marginTop: 0 }}>No summary yet.</p>
-        <p className="small muted" style={{ marginBottom: 0 }}>
-          {segmentCount === 0
-            ? "Summaries are written from the transcript, so this needs a transcript first."
-            : "Add an Anthropic API key in settings to generate one. Everything else works without it."}
-        </p>
-      </div>
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // The summary runs on a worker thread and reports back by event, so this listens
+  // rather than awaiting the invoke.
+  useEffect(() => {
+    const unlisten = listen<{ event_id: number; stage: string; message?: string }>(
+      "summary",
+      (message) => {
+        if (message.payload.event_id !== event.id) return;
+        if (message.payload.stage === "done") {
+          setRunning(false);
+          onChanged();
+        } else if (message.payload.stage === "failed") {
+          setRunning(false);
+          setError(message.payload.message ?? "Summary failed.");
+        }
+      },
     );
-  }
-  return <div className="summary">{renderMarkdown(event.summary_md)}</div>;
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [event.id, onChanged]);
+
+  const generate = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      await invoke("generate_summary", { eventId: event.id });
+    } catch (problem) {
+      setRunning(false);
+      setError(String((problem as { message?: string })?.message ?? problem));
+    }
+  };
+
+  const canGenerate = segmentCount > 0;
+
+  return (
+    <div>
+      {error ? (
+        <div className="banner problem" style={{ marginBottom: 14 }}>
+          {error}
+        </div>
+      ) : null}
+
+      {event.summary_md ? (
+        <>
+          <div className="summary">{renderMarkdown(event.summary_md)}</div>
+          <div className="row" style={{ marginTop: 24 }}>
+            <button type="button" className="button" onClick={generate} disabled={running}>
+              {running ? "Regenerating…" : "Regenerate"}
+            </button>
+            <span className="small muted">
+              Rewritten from the transcript. The recording is not touched.
+              {event.model_used ? ` Last written by ${event.model_used}.` : ""}
+            </span>
+          </div>
+        </>
+      ) : (
+        <div className="panel">
+          <p style={{ marginTop: 0 }}>{running ? "Writing the summary…" : "No summary yet."}</p>
+          <p className="small muted">
+            {canGenerate
+              ? "Summaries are the only feature that sends anything off this machine, and only when you ask."
+              : "Summaries are written from the transcript, so this needs a transcript first."}
+          </p>
+          <button
+            type="button"
+            className="button primary"
+            onClick={generate}
+            disabled={running || !canGenerate}
+            style={{ marginTop: 6 }}
+          >
+            {running ? "Writing…" : "Write a summary"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function AudioTab({

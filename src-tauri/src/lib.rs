@@ -54,6 +54,7 @@ pub fn run() {
             commands::settings::settings,
             commands::settings::save_api_key,
             commands::settings::clear_api_key,
+            commands::summary::generate_summary,
         ])
         .setup(|app| {
             // Recording is driven from the window; without one there is nothing to drive
