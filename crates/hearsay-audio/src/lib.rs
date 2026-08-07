@@ -8,7 +8,9 @@
 //! boundary are expected to wrap them in `anyhow`.
 
 pub mod helper;
+pub mod mic;
 pub mod mix;
+pub mod mixer;
 pub mod process;
 pub mod recorder;
 pub mod source;
@@ -16,6 +18,8 @@ pub mod wav;
 
 pub use helper::{HelperEvent, HelperSource, HelperStatus, TapTarget};
 pub use process::{AudibleApp, AudioProcess};
+pub use mic::MicSource;
+pub use mixer::Mixer;
 pub use recorder::{Recording, RecordingOutcome, RecordingStatus};
 pub use source::{AudioFormat, AudioSource, Chunk};
 pub use wav::WavWriter;
@@ -39,6 +43,13 @@ pub enum AudioError {
 
     #[error("no audio-producing process matched the request")]
     NoSuchProcess,
+
+    #[error("no microphone is available. Conversation mode needs an input device; \
+             listen-only mode does not.")]
+    NoInputDevice,
+
+    #[error("{message}")]
+    InputFailed { message: String },
 
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),

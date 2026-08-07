@@ -35,6 +35,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tiny_http = "0.12"
 hound = "3.5"
 libc = "0.2"
+cpal = "0.18"
 
 [profile.release]
 lto = true

@@ -1,41 +1,53 @@
 //! Running a recording session.
 //!
-//! Owns a reader thread that pulls from the audio source and writes to the WAV, plus a
-//! control channel the UI drives it through. The session outlives any single command, so
+//! One reader thread per source feeds a shared [`Mixer`]; a writer thread drains it on a
+//! wall clock and appends to the WAV. The session outlives any single command, so
 //! everything the UI needs to display lives behind a mutex it can read at any time.
 //!
-//! The microphone guarantee is structural, not a runtime check: in
-//! [`Mode::ListenOnly`] there is no branch in this file that constructs a microphone
-//! source. There is nothing to disable and nothing to get wrong.
+//! The microphone guarantee is structural, not a runtime check: in [`Mode::ListenOnly`]
+//! there is no branch in this file that constructs a microphone source. There is nothing
+//! to disable and nothing to get wrong.
 
+use crate::mic::MicSource;
 use crate::mix::downmix_to_mono;
+use crate::mixer::{resample_mono, Channel, Mixer};
 use crate::source::{AudioFormat, AudioSource, Chunk};
 use crate::wav::WavWriter;
 use crate::{AudioError, HelperSource, Mode, Result, TapTarget};
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// How long the reader waits for audio before looping to check for control messages.
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How long a reader waits for audio before looping to check whether it should stop.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How often the writer commits elapsed frames to disk.
+const WRITE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What the UI reads while a recording is running.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RecordingStatus {
     pub elapsed_ms: u64,
     pub frames_written: u64,
-    /// Peak level of the most recent buffer, for a meter.
+    /// Peak level of the most recent committed buffer, for a meter.
     pub peak: f32,
-    /// True once the source has produced at least one non-zero sample. If this stays
-    /// false while a recording runs, the recording is silent and the user needs to know
-    /// now rather than at playback.
+    /// True once the system tap has produced a non-zero sample. If this stays false
+    /// while a recording runs, the recording is silent and the user needs to know now
+    /// rather than at playback.
     pub has_audio: bool,
+    /// True once the microphone has produced a non-zero sample. Always false in
+    /// listen-only mode, because there is no microphone.
+    pub has_mic_audio: bool,
     /// The helper reported capturing zeros while audio was provably playing.
     pub silent_while_audio_playing: bool,
+    pub muted: bool,
 }
+
+/// A completed mute span, in milliseconds from the start of the recording.
+pub type MuteSpan = (i64, i64);
 
 /// The result of a finished session.
 #[derive(Debug, Clone)]
@@ -46,62 +58,87 @@ pub struct RecordingOutcome {
     pub format: AudioFormat,
     /// False means every sample written was zero.
     pub produced_audio: bool,
+    /// Every stretch during which the microphone was writing zeros.
+    pub mute_spans: Vec<MuteSpan>,
+}
+
+/// Shared control surface, readable and writable from any thread.
+struct Shared {
+    mixer: Mutex<Mixer>,
+    status: Mutex<RecordingStatus>,
+    mute_spans: Mutex<Vec<MuteSpan>>,
+    /// Start of the mute span currently open, if any.
+    mute_started_ms: Mutex<Option<i64>>,
+    stop: AtomicBool,
+    /// Samples the microphone erased before they reached disk.
+    scrubbed_samples: AtomicU64,
 }
 
 /// A running session. Dropping it stops the recording.
 pub struct Recording {
-    stop_flag: Arc<AtomicBool>,
-    status: Arc<Mutex<RecordingStatus>>,
-    worker: Option<JoinHandle<Result<RecordingOutcome>>>,
+    shared: Arc<Shared>,
+    workers: Vec<JoinHandle<()>>,
+    writer: Option<JoinHandle<Result<RecordingOutcome>>>,
     path: PathBuf,
     mode: Mode,
+    started: Instant,
 }
 
 impl Recording {
     /// Starts recording to `path`.
     ///
-    /// Returns an error rather than a running-but-useless session if the tap cannot be
-    /// obtained: no permission, no such process, no helper.
+    /// Returns an error rather than a running-but-useless session if a device cannot be
+    /// obtained: no permission, no such process, no helper, no microphone.
     pub fn start(mode: Mode, target: TapTarget, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
-        // The only source constructed here. `Mode::Conversation` gains a microphone
-        // alongside it; `Mode::ListenOnly` has no path to one.
+        // The only place a microphone is ever constructed. `Mode::ListenOnly` has no
+        // path here — the match has no arm that opens an input device.
+        //
+        // Order matters, and not for a subtle reason: opening an input device *after*
+        // the tap's aggregate device exists takes over four minutes on macOS, against
+        // under 200 ms before it. Creating the aggregate device evidently leaves the
+        // HAL in a state where opening a new input stream crawls. Microphone first, tap
+        // second, and both open promptly.
+        //
+        // If the tap then fails, `mic` is dropped on the way out and `MicSource::drop`
+        // closes the device — a failed start never leaves the microphone open.
+        let mic = match mode {
+            Mode::ListenOnly => None,
+            Mode::Conversation => Some(MicSource::start()?),
+        };
+
         let system = HelperSource::start(target)?;
-        let source_format = system.format();
+        let sample_rate = system.format().sample_rate;
 
-        if mode.opens_microphone() {
-            // Reached only once a microphone source exists to pair with the tap.
-            return Err(AudioError::HelperFailed {
-                status: 0,
-                stderr: "conversation mode needs the microphone source, which is not \
-                         wired up in this build"
-                    .to_string(),
-            });
-        }
-
-        // The tap hands us the machine's stereo output; that pair is one voice —
-        // "everyone else" — so it is folded to a single channel before being written.
-        let output_format = AudioFormat::new(source_format.sample_rate, mode.channel_count());
+        let output_format = AudioFormat::new(sample_rate, mode.channel_count());
         let writer = WavWriter::create(&path, output_format)?;
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let status = Arc::new(Mutex::new(RecordingStatus::default()));
+        let shared = Arc::new(Shared {
+            mixer: Mutex::new(Mixer::new(sample_rate, mode.channel_count())),
+            status: Mutex::new(RecordingStatus::default()),
+            mute_spans: Mutex::new(Vec::new()),
+            mute_started_ms: Mutex::new(None),
+            stop: AtomicBool::new(false),
+            scrubbed_samples: AtomicU64::new(0),
+        });
 
-        let worker = spawn_worker(
-            system,
-            writer,
-            output_format,
-            Arc::clone(&stop_flag),
-            Arc::clone(&status),
-        )?;
+        let mut workers = Vec::new();
+        workers.push(spawn_system_reader(system, Arc::clone(&shared))?);
+        if let Some(mic) = mic {
+            workers.push(spawn_mic_reader(mic, sample_rate, Arc::clone(&shared))?);
+        }
+
+        let started = Instant::now();
+        let writer_thread = spawn_writer(writer, output_format, Arc::clone(&shared), started)?;
 
         Ok(Self {
-            stop_flag,
-            status,
-            worker: Some(worker),
+            shared,
+            workers,
+            writer: Some(writer_thread),
             path,
             mode,
+            started,
         })
     }
 
@@ -114,96 +151,287 @@ impl Recording {
     }
 
     pub fn status(&self) -> RecordingStatus {
-        self.status
+        self.shared
+            .status
             .lock()
             .map(|status| status.clone())
             .unwrap_or_default()
     }
 
+    fn elapsed_ms(&self) -> i64 {
+        self.started.elapsed().as_millis() as i64
+    }
+
+    /// Turns the microphone channel to zeros, or back on.
+    ///
+    /// Only meaningful in conversation mode. The input device is never stopped or
+    /// reopened — muting writes zeros, so the timeline stays continuous and macOS never
+    /// re-prompts. Returns the new state.
+    pub fn set_muted(&self, muted: bool) -> Result<bool> {
+        if !self.mode.opens_microphone() {
+            // Nothing to mute: the microphone was never opened.
+            return Ok(false);
+        }
+
+        let now = self.elapsed_ms();
+        {
+            let mut mixer = self.shared.mixer.lock().map_err(|_| poisoned())?;
+            if mixer.is_muted() == muted {
+                return Ok(muted);
+            }
+            mixer.set_muted(muted);
+        }
+
+        let mut open = self.shared.mute_started_ms.lock().map_err(|_| poisoned())?;
+        if muted {
+            *open = Some(now);
+        } else if let Some(start) = open.take() {
+            // Record the span the moment it closes, so a crash mid-recording still
+            // leaves every completed span accounted for.
+            self.shared
+                .mute_spans
+                .lock()
+                .map_err(|_| poisoned())?
+                .push((start, now));
+        }
+
+        if let Ok(mut status) = self.shared.status.lock() {
+            status.muted = muted;
+        }
+        Ok(muted)
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.shared
+            .mixer
+            .lock()
+            .map(|mixer| mixer.is_muted())
+            .unwrap_or(false)
+    }
+
+    pub fn toggle_mute(&self) -> Result<bool> {
+        let next = !self.is_muted();
+        self.set_muted(next)
+    }
+
+    /// Erases microphone audio that has been captured but not yet committed to disk.
+    ///
+    /// Returns the number of samples erased. Nothing already written to the file is
+    /// touched — this covers the window between speaking and the audio reaching disk.
+    pub fn scrub_microphone(&self) -> Result<usize> {
+        if !self.mode.opens_microphone() {
+            return Ok(0);
+        }
+        let erased = self
+            .shared
+            .mixer
+            .lock()
+            .map_err(|_| poisoned())?
+            .scrub_mic();
+        self.shared
+            .scrubbed_samples
+            .fetch_add(erased as u64, Ordering::Relaxed);
+        tracing::info!("scrubbed {erased} microphone samples before they reached disk");
+        Ok(erased)
+    }
+
+    pub fn scrubbed_samples(&self) -> u64 {
+        self.shared.scrubbed_samples.load(Ordering::Relaxed)
+    }
+
     /// Stops the recording and waits for the file to be finalised.
     pub fn stop(mut self) -> Result<RecordingOutcome> {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        match self.worker.take() {
-            Some(worker) => worker.join().unwrap_or_else(|_| {
+        // Close any mute span still open, so it is never lost by stopping while muted.
+        if self.is_muted() {
+            let _ = self.set_muted(false);
+        }
+        self.shared.stop.store(true, Ordering::Relaxed);
+
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+
+        let mut outcome = match self.writer.take() {
+            Some(writer) => writer.join().unwrap_or_else(|_| {
                 Err(AudioError::HelperFailed {
                     status: 0,
                     stderr: "the recording thread panicked; the audio written before that \
                              point is still on disk"
                         .to_string(),
                 })
-            }),
-            None => Err(AudioError::HelperNoFormat),
-        }
+            })?,
+            None => return Err(AudioError::HelperNoFormat),
+        };
+
+        outcome.mute_spans = self
+            .shared
+            .mute_spans
+            .lock()
+            .map(|spans| spans.clone())
+            .unwrap_or_default();
+        Ok(outcome)
     }
 }
 
 impl Drop for Recording {
-    /// If a session is dropped without `stop`, the worker still finalises the file. The
-    /// recording so far is never lost just because nobody asked for it politely.
+    /// If a session is dropped without `stop`, the threads still wind down and the file
+    /// is still finalised. A recording is never lost just because nobody asked politely.
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        if let Some(worker) = self.worker.take() {
+        self.shared.stop.store(true, Ordering::Relaxed);
+        for worker in self.workers.drain(..) {
             let _ = worker.join();
+        }
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
         }
     }
 }
 
-fn spawn_worker(
+fn poisoned() -> AudioError {
+    AudioError::HelperFailed {
+        status: 0,
+        stderr: "the recorder's state was left inconsistent by an earlier panic".to_string(),
+    }
+}
+
+fn spawn_system_reader(
     mut system: HelperSource,
-    mut writer: WavWriter,
-    output_format: AudioFormat,
-    stop_flag: Arc<AtomicBool>,
-    status: Arc<Mutex<RecordingStatus>>,
-) -> Result<JoinHandle<Result<RecordingOutcome>>> {
-    let source_channels = system.format().channels;
-    let started = Instant::now();
+    shared: Arc<Shared>,
+) -> Result<JoinHandle<()>> {
+    let channels = system.format().channels;
 
     std::thread::Builder::new()
-        .name("hearsay-recorder".into())
+        .name("hearsay-read-system".into())
         .spawn(move || {
-            let mut produced_audio = false;
-
-            while !stop_flag.load(Ordering::Relaxed) {
+            while !shared.stop.load(Ordering::Relaxed) {
                 match system.next_chunk_timeout(POLL_INTERVAL) {
                     Chunk::Samples(samples) => {
-                        let mono = downmix_to_mono(&samples, source_channels);
-                        let peak = mono.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
-                        if peak > 0.0 {
-                            produced_audio = true;
+                        // The tap delivers the machine's stereo output. That pair is one
+                        // voice — "everyone else" — so it folds to a single channel
+                        // before being written. This is not mixing mic and system
+                        // together; those never meet.
+                        let mono = downmix_to_mono(&samples, channels);
+                        if let Ok(mut mixer) = shared.mixer.lock() {
+                            mixer.push(Channel::System, &mono);
                         }
-                        writer.write_samples(&mono)?;
-
-                        if let Ok(mut status) = status.lock() {
-                            status.elapsed_ms = started.elapsed().as_millis() as u64;
-                            status.frames_written = writer.frames_written();
-                            status.peak = peak;
-                            status.has_audio = produced_audio;
+                        if let Ok(mut status) = shared.status.lock() {
+                            if !status.has_audio && mono.iter().any(|s| *s != 0.0) {
+                                status.has_audio = true;
+                            }
                             status.silent_while_audio_playing = system.is_silently_failing();
                         }
                     }
                     Chunk::Idle => {
-                        // An output device that has gone quiet stops producing buffers
-                        // altogether. That is normal, not a failure — keep the elapsed
-                        // clock moving so the UI does not look frozen.
-                        if let Ok(mut status) = status.lock() {
-                            status.elapsed_ms = started.elapsed().as_millis() as u64;
-                            status.peak = 0.0;
+                        if let Ok(mut status) = shared.status.lock() {
                             status.silent_while_audio_playing = system.is_silently_failing();
                         }
                     }
                     Chunk::Finished => break,
                 }
             }
+            let _ = system.stop();
+        })
+        .map_err(AudioError::Io)
+}
 
-            system.stop()?;
+fn spawn_mic_reader(
+    mut mic: MicSource,
+    target_rate: u32,
+    shared: Arc<Shared>,
+) -> Result<JoinHandle<()>> {
+    let mic_rate = mic.format().sample_rate;
+
+    std::thread::Builder::new()
+        .name("hearsay-read-mic".into())
+        .spawn(move || {
+            while !shared.stop.load(Ordering::Relaxed) {
+                match mic.next_chunk_timeout(POLL_INTERVAL) {
+                    Chunk::Samples(samples) => {
+                        // Both channels must be at the output file's rate or they drift
+                        // apart over the length of a meeting.
+                        let aligned = resample_mono(&samples, mic_rate, target_rate);
+                        let heard = aligned.iter().any(|s| *s != 0.0);
+
+                        if let Ok(mut mixer) = shared.mixer.lock() {
+                            mixer.push(Channel::Mic, &aligned);
+                        }
+                        if heard {
+                            if let Ok(mut status) = shared.status.lock() {
+                                status.has_mic_audio = true;
+                            }
+                        }
+                    }
+                    Chunk::Idle => {}
+                    Chunk::Finished => break,
+                }
+            }
+            let _ = mic.stop();
+        })
+        .map_err(AudioError::Io)
+}
+
+/// Commits elapsed frames to the WAV on a wall clock.
+fn spawn_writer(
+    mut writer: WavWriter,
+    output_format: AudioFormat,
+    shared: Arc<Shared>,
+    started: Instant,
+) -> Result<JoinHandle<Result<RecordingOutcome>>> {
+    let sample_rate = output_format.sample_rate.max(1) as u64;
+    let channels = output_format.channels.max(1) as usize;
+
+    std::thread::Builder::new()
+        .name("hearsay-write".into())
+        .spawn(move || {
+            let mut produced_audio = false;
+
+            loop {
+                let stopping = shared.stop.load(Ordering::Relaxed);
+
+                // How many frames should exist by now, if the file matched real time.
+                let elapsed = started.elapsed();
+                let target =
+                    (elapsed.as_millis() as u64).saturating_mul(sample_rate) / 1000;
+                let already = writer.frames_written();
+                let due = target.saturating_sub(already) as usize;
+
+                if due > 0 {
+                    let samples = match shared.mixer.lock() {
+                        Ok(mut mixer) => mixer.take(due),
+                        Err(_) => Vec::new(),
+                    };
+
+                    if !samples.is_empty() {
+                        let peak = samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+                        if peak > 0.0 {
+                            produced_audio = true;
+                        }
+                        writer.write_samples(&samples)?;
+
+                        if let Ok(mut status) = shared.status.lock() {
+                            status.elapsed_ms = elapsed.as_millis() as u64;
+                            status.frames_written = writer.frames_written();
+                            status.peak = peak;
+                        }
+                    }
+                }
+
+                if stopping {
+                    break;
+                }
+                std::thread::sleep(WRITE_INTERVAL);
+            }
+
             writer.finalize()?;
 
+            let _ = channels; // documented above; the mixer owns interleaving
             Ok(RecordingOutcome {
                 path: writer.path().to_path_buf(),
                 frames: writer.frames_written(),
                 duration_ms: writer.duration_ms(),
                 format: output_format,
                 produced_audio,
+                mute_spans: Vec::new(),
             })
         })
         .map_err(AudioError::Io)
@@ -219,5 +447,11 @@ mod tests {
     fn listen_only_declares_one_channel_and_no_microphone() {
         assert_eq!(Mode::ListenOnly.channel_count(), 1);
         assert!(!Mode::ListenOnly.opens_microphone());
+    }
+
+    #[test]
+    fn conversation_declares_two_channels() {
+        assert_eq!(Mode::Conversation.channel_count(), 2);
+        assert!(Mode::Conversation.opens_microphone());
     }
 }

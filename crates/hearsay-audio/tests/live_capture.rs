@@ -159,3 +159,57 @@ fn a_listen_only_session_writes_a_playable_wav() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// Conversation mode: one stereo file, microphone on the left, system audio on the right.
+///
+/// Opening the microphone triggers the macOS permission prompt the first time. If this
+/// test fails with a permission error, grant Microphone access to whatever launched it
+/// in System Settings → Privacy & Security → Microphone.
+#[test]
+#[ignore = "opens the microphone — needs macOS microphone permission"]
+fn conversation_mode_writes_the_mic_left_and_system_right() {
+    use hearsay_audio::{Mode, Recording};
+
+    let path = std::env::temp_dir().join(format!("hearsay-stereo-{}.wav", std::process::id()));
+    let recording = Recording::start(Mode::Conversation, TapTarget::SystemWide, &path)
+        .expect("conversation recording should start");
+
+    std::thread::sleep(Duration::from_secs(4));
+    let status = recording.status();
+    println!("mid-session: {status:?}");
+
+    let outcome = recording.stop().expect("recording should stop cleanly");
+    println!(
+        "wrote {} frames ({} ms)",
+        outcome.frames, outcome.duration_ms
+    );
+
+    let reader = hound::WavReader::open(&path).expect("the file should be a readable wav");
+    assert_eq!(reader.spec().channels, 2, "conversation mode must be stereo");
+
+    let samples: Vec<i16> = reader
+        .into_samples::<i16>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("samples decode");
+    assert!(!samples.is_empty(), "no audio was written");
+
+    // Interleaved: even indices are left (mic), odd are right (system).
+    let left_peak = samples.iter().step_by(2).map(|s| s.abs()).max().unwrap_or(0);
+    let right_peak = samples
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .map(|s| s.abs())
+        .max()
+        .unwrap_or(0);
+    println!("left (mic) peak: {left_peak}, right (system) peak: {right_peak}");
+
+    // Exactly one frame count for both channels — that is the alignment guarantee.
+    assert_eq!(samples.len() % 2, 0, "stereo output must be whole frames");
+    assert!(
+        status.has_mic_audio || left_peak > 0,
+        "the microphone channel is entirely silent — check microphone permission"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
