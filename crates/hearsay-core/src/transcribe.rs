@@ -212,6 +212,48 @@ pub fn transcribe_channel(
     serde_json::from_str(trimmed).with_context(|| "could not parse the transcription result")
 }
 
+/// Transcribes a whole recording, one pass per channel, and returns every segment
+/// tagged with who said it.
+///
+/// A `listen_only` recording is one mono channel and everything in it is `system`. A
+/// `conversation` recording is two passes: the left channel is the user, the right is
+/// everyone else. That split is the entire speaker-attribution mechanism, and it costs
+/// nothing beyond the second pass because the channels were never mixed.
+///
+/// The passes run one after another rather than in parallel: both are CPU-bound on the
+/// same cores, so running them together makes the whole job slower, not faster, and
+/// makes the progress reporting meaningless.
+pub fn transcribe_recording(
+    audio_path: &Path,
+    mode: hearsay_audio::Mode,
+    model: &str,
+    models_dir: &Path,
+    mut on_event: impl FnMut(TranscribeEvent),
+) -> Result<Vec<TranscriptSegment>> {
+    let channels: &[Channel] = match mode {
+        hearsay_audio::Mode::ListenOnly => &[Channel::Mono],
+        hearsay_audio::Mode::Conversation => &[Channel::Left, Channel::Right],
+    };
+
+    let mut all: Vec<TranscriptSegment> = Vec::new();
+    for channel in channels {
+        let result = transcribe_channel(audio_path, *channel, model, models_dir, &mut on_event)
+            .with_context(|| format!("transcribing the {} channel", channel.as_arg()))?;
+
+        // Overwrite whatever the sidecar reported: the channel a segment came from is
+        // decided here, where the recording mode is known.
+        for mut segment in result.segments {
+            segment.channel = channel.db_channel().to_string();
+            all.push(segment);
+        }
+    }
+
+    // Interleave the two channels into one timeline so the transcript reads as a
+    // conversation rather than as two monologues.
+    all.sort_by_key(|segment| (segment.start_ms, segment.end_ms));
+    Ok(all)
+}
+
 fn parse_event(line: &str) -> TranscribeEvent {
     let trimmed = line.trim();
     if !trimmed.starts_with('{') {

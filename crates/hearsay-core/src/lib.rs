@@ -7,4 +7,4 @@ pub mod paths;
 pub mod transcribe;
 
 pub use hearsay_audio::Mode;
-pub use transcribe::{Channel, TranscriptSegment, TranscriptionResult};
+pub use transcribe::{transcribe_recording, Channel, TranscriptSegment, TranscriptionResult};
