@@ -4,6 +4,7 @@
 //! functions here and owns no business logic.
 
 pub mod db;
+pub mod dedupe;
 pub mod paths;
 pub mod secrets;
 pub mod summary;

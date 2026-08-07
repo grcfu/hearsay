@@ -13,6 +13,8 @@ interface LiveStatus {
   peak: number;
   has_audio: boolean;
   silent_while_audio_playing: boolean;
+  muted: boolean;
+  echo: { lag_ms: number; correlation: number } | null;
 }
 
 interface Props {
@@ -224,6 +226,13 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
               <p className="small" style={{ opacity: 0.8, margin: "2px 6px 0" }}>
                 Your microphone is writing silence. The other side is still being
                 recorded, and the muted stretch is marked in the transcript.
+              </p>
+            ) : null}
+            {live?.echo ? (
+              <p className="small" style={{ opacity: 0.85, margin: "2px 6px 0" }}>
+                The other side is coming back through your microphone. Headphones would
+                keep the two voices apart in the transcript. Recording continues either
+                way.
               </p>
             ) : null}
             {live && !live.has_audio ? (

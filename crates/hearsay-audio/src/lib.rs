@@ -7,6 +7,7 @@
 //! Errors in this crate are concrete ([`AudioError`]); callers at the application
 //! boundary are expected to wrap them in `anyhow`.
 
+pub mod echo;
 pub mod helper;
 pub mod mic;
 pub mod mix;
@@ -16,6 +17,7 @@ pub mod recorder;
 pub mod source;
 pub mod wav;
 
+pub use echo::{detect_bleed, EchoDetection};
 pub use helper::{HelperEvent, HelperSource, HelperStatus, TapTarget};
 pub use process::{AudibleApp, AudioProcess};
 pub use mic::MicSource;

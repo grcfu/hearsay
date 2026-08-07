@@ -86,6 +86,17 @@ fn run(
         let _ = app.emit("transcription", payload);
     })?;
 
+    // Drop microphone lines that are echoes of the other party. Only meaningful in
+    // conversation mode; a listen-only transcript has one channel and nothing to compare.
+    let (segments, echoes_dropped) = if mode.opens_microphone() {
+        hearsay_core::dedupe::drop_echoed_segments(segments)
+    } else {
+        (segments, 0)
+    };
+    if echoes_dropped > 0 {
+        tracing::info!("dropped {echoes_dropped} echoed mic segment(s) from {event_id}");
+    }
+
     let rows: Vec<NewSegment> = segments
         .into_iter()
         .map(|segment| NewSegment {
@@ -103,6 +114,7 @@ fn run(
         "transcription",
         serde_json::json!({
             "event_id": event_id, "stage": "done", "segments": count,
+            "echoes_dropped": echoes_dropped,
         }),
     );
     Ok(())

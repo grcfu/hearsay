@@ -8,6 +8,7 @@
 //! there is no branch in this file that constructs a microphone source. There is nothing
 //! to disable and nothing to get wrong.
 
+use crate::echo::{detect_bleed, split_stereo, EchoDetection};
 use crate::mic::MicSource;
 use crate::mix::downmix_to_mono;
 use crate::mixer::{resample_mono, Channel, Mixer, SCRUB_WINDOW_SECONDS};
@@ -27,6 +28,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// How often the writer commits elapsed frames to disk.
 const WRITE_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Audio kept for echo analysis. Two seconds is plenty to correlate and small enough to
+/// hold without thinking about it.
+const ANALYSIS_SECONDS: usize = 2;
+
+/// How soon after starting to check for echo, and how often after that.
+///
+/// Once early, so the user can put headphones on before the meeting gets going, then
+/// once a minute — an echo can appear mid-call when someone unplugs their headphones.
+const FIRST_ECHO_CHECK: Duration = Duration::from_secs(12);
+const ECHO_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
 /// What the UI reads while a recording is running.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RecordingStatus {
@@ -44,6 +56,9 @@ pub struct RecordingStatus {
     /// The helper reported capturing zeros while audio was provably playing.
     pub silent_while_audio_playing: bool,
     pub muted: bool,
+    /// Set when the other party's voice is bleeding into the microphone. Advisory: it
+    /// suggests headphones and changes nothing about the recording.
+    pub echo: Option<EchoDetection>,
 }
 
 /// A completed mute span, in milliseconds from the start of the recording.
@@ -72,6 +87,8 @@ struct Shared {
     stop: AtomicBool,
     /// Samples the microphone erased before they reached disk.
     scrubbed_samples: AtomicU64,
+    /// The most recently committed stereo audio, kept for echo analysis.
+    analysis: Mutex<Vec<f32>>,
 }
 
 /// A running session. Dropping it stops the recording.
@@ -133,6 +150,7 @@ impl Recording {
             mute_started_ms: Mutex::new(None),
             stop: AtomicBool::new(false),
             scrubbed_samples: AtomicU64::new(0),
+            analysis: Mutex::new(Vec::new()),
         });
 
         let mut workers = Vec::new();
@@ -402,6 +420,7 @@ fn spawn_writer(
         .name("hearsay-write".into())
         .spawn(move || {
             let mut produced_audio = false;
+            let mut next_echo_check = FIRST_ECHO_CHECK;
 
             loop {
                 let stopping = shared.stop.load(Ordering::Relaxed);
@@ -433,6 +452,19 @@ fn spawn_writer(
                         }
                         writer.write_samples(&samples)?;
 
+                        // Keep the tail for echo analysis. Only stereo has two channels
+                        // to correlate, so listen-only never accumulates anything.
+                        if output_format.channels >= 2 {
+                            if let Ok(mut analysis) = shared.analysis.lock() {
+                                analysis.extend_from_slice(&samples);
+                                let cap = ANALYSIS_SECONDS * sample_rate as usize * 2;
+                                if analysis.len() > cap {
+                                    let excess = analysis.len() - cap;
+                                    analysis.drain(..excess);
+                                }
+                            }
+                        }
+
                         if let Ok(mut status) = shared.status.lock() {
                             status.frames_written = writer.frames_written();
                             status.peak = peak;
@@ -442,6 +474,36 @@ fn spawn_writer(
 
                 if let Ok(mut status) = shared.status.lock() {
                     status.elapsed_ms = elapsed.as_millis() as u64;
+                }
+
+                if output_format.channels >= 2 && elapsed >= next_echo_check {
+                    next_echo_check = elapsed + ECHO_CHECK_INTERVAL;
+                    let window = shared
+                        .analysis
+                        .lock()
+                        .map(|analysis| analysis.clone())
+                        .unwrap_or_default();
+
+                    if !window.is_empty() {
+                        let (mic, system) = split_stereo(&window);
+                        let found = detect_bleed(&mic, &system, sample_rate as u32);
+                        if let Some(found) = found {
+                            tracing::warn!(
+                                "system audio is bleeding into the microphone \
+                                 ({} ms lag, correlation {:.2}) — headphones would fix it",
+                                found.lag_ms,
+                                found.correlation
+                            );
+                        }
+                        if let Ok(mut status) = shared.status.lock() {
+                            // Sticky: once seen, the banner stays until the recording
+                            // ends. An echo that comes and goes is still an echo, and a
+                            // banner that flickers is one the user learns to ignore.
+                            if status.echo.is_none() {
+                                status.echo = found;
+                            }
+                        }
+                    }
                 }
 
                 if stopping {
