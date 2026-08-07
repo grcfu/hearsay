@@ -14,6 +14,11 @@ pub fn mute() -> Shortcut {
     Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyM)
 }
 
+/// ⌘⇧X — erase microphone audio captured in the last minute but not yet written.
+pub fn scrub() -> Shortcut {
+    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyX)
+}
+
 /// Registers every global shortcut.
 ///
 /// A failure here is reported but not fatal: another app may already own the
@@ -22,7 +27,7 @@ pub fn mute() -> Shortcut {
 pub fn register(app: &AppHandle) {
     let shortcuts = app.global_shortcut();
 
-    for (shortcut, name) in [(mute(), "⌘⇧M (mute)")] {
+    for (shortcut, name) in [(mute(), "⌘⇧M (mute)"), (scrub(), "⌘⇧X (scrub)")] {
         match shortcuts.register(shortcut) {
             Ok(()) => tracing::info!("registered global shortcut {name}"),
             Err(error) => tracing::warn!(
@@ -43,5 +48,7 @@ pub fn handle(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
     }
     if shortcut == &mute() {
         crate::commands::mute::toggle_from_shortcut(app);
+    } else if shortcut == &scrub() {
+        crate::commands::scrub::scrub_from_shortcut(app);
     }
 }

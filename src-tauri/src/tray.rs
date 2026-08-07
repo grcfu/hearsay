@@ -20,6 +20,7 @@ const TRAY_ID: &str = "hearsay";
 struct Items {
     status: MenuItem<Wry>,
     mute: MenuItem<Wry>,
+    scrub: MenuItem<Wry>,
 }
 
 static ITEMS: OnceLock<Mutex<Items>> = OnceLock::new();
@@ -28,6 +29,13 @@ static ITEMS: OnceLock<Mutex<Items>> = OnceLock::new();
 pub fn build(app: &AppHandle) -> tauri::Result<TrayIcon> {
     let status = MenuItem::with_id(app, "status", "Not recording", false, None::<&str>)?;
     let mute = MenuItem::with_id(app, "mute", "Mute microphone", false, Some("Cmd+Shift+M"))?;
+    let scrub = MenuItem::with_id(
+        app,
+        "scrub",
+        "Erase last 60 seconds of microphone",
+        false,
+        Some("Cmd+Shift+X"),
+    )?;
     let show = MenuItem::with_id(app, "show", "Open Hearsay", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Hearsay", true, None::<&str>)?;
 
@@ -37,6 +45,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayIcon> {
             &status,
             &PredefinedMenuItem::separator(app)?,
             &mute,
+            &scrub,
             &PredefinedMenuItem::separator(app)?,
             &show,
             &quit,
@@ -49,6 +58,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayIcon> {
         .tooltip("Hearsay — not recording")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "mute" => crate::commands::mute::toggle_from_shortcut(app),
+            "scrub" => crate::commands::scrub::scrub_from_shortcut(app),
             "show" => {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
@@ -78,6 +88,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<TrayIcon> {
     let _ = ITEMS.set(Mutex::new(Items {
         status: status.clone(),
         mute: mute.clone(),
+        scrub: scrub.clone(),
     }));
     Ok(tray)
 }
@@ -132,5 +143,6 @@ pub fn refresh(app: &AppHandle) {
         let _ = items.status.set_text(&status_text);
         let _ = items.mute.set_text(mute_label);
         let _ = items.mute.set_enabled(conversation);
+        let _ = items.scrub.set_enabled(conversation);
     }
 }

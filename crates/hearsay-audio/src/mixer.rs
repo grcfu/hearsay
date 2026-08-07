@@ -13,13 +13,26 @@
 
 use std::collections::VecDeque;
 
-/// How far a channel may run ahead of the wall clock before the oldest audio is dropped.
+/// Slack above the commit delay before the oldest audio is dropped.
 ///
 /// Two devices at a nominal 48 kHz still drift by a few samples per minute. Without a
 /// cap, the faster one's backlog grows for the length of the meeting and its channel
 /// ends up increasingly delayed. One second is far beyond any legitimate scheduling
 /// jitter and far below anything a listener would notice being trimmed.
-const MAX_BACKLOG_SECONDS: f32 = 1.0;
+const BACKLOG_SLACK_SECONDS: f32 = 1.0;
+
+/// How long microphone audio waits before it is committed to disk.
+///
+/// This is the window the retroactive scrub can reach back into: press ⌘⇧X and
+/// everything still inside it is erased before it ever reaches the file. The mute button
+/// only helps someone who thought to press it in advance; this is what covers the side
+/// conversation you only realised was sensitive after it started.
+///
+/// **Both** channels are held for this long, not just the microphone. Committing the
+/// system channel immediately and the microphone a minute later would put them a minute
+/// out of step in the finished file, and every timestamp — and the speaker attribution
+/// that rests on it — would be wrong.
+pub const SCRUB_WINDOW_SECONDS: u32 = 60;
 
 /// Which channel a buffer belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +50,8 @@ pub struct Mixer {
     sample_rate: u32,
     channels: u16,
     max_backlog: usize,
+    /// Frames held back from the writer so the scrub has something to erase.
+    delay_frames: usize,
     /// While true, microphone samples are replaced by zeros on the way in.
     ///
     /// Deliberately applied here rather than by stopping the device: the input stream
@@ -47,16 +62,53 @@ pub struct Mixer {
 }
 
 impl Mixer {
+    /// A mixer that commits audio as soon as it arrives. Used in listen-only mode, where
+    /// there is no microphone and therefore nothing to scrub — so the file on disk stays
+    /// current instead of trailing a minute behind.
     pub fn new(sample_rate: u32, channels: u16) -> Self {
-        let max_backlog = (sample_rate as f32 * MAX_BACKLOG_SECONDS) as usize;
+        Self::with_delay(sample_rate, channels, 0)
+    }
+
+    /// A mixer that holds `delay_frames` frames back from the writer.
+    pub fn with_delay(sample_rate: u32, channels: u16, delay_frames: usize) -> Self {
+        let slack = (sample_rate as f32 * BACKLOG_SLACK_SECONDS) as usize;
         Self {
             mic: VecDeque::new(),
             system: VecDeque::new(),
             sample_rate,
             channels,
-            max_backlog: max_backlog.max(1),
+            max_backlog: (delay_frames + slack).max(1),
+            delay_frames,
             muted: false,
             dropped_frames: 0,
+        }
+    }
+
+    /// Frames the scrub can still reach.
+    pub fn delay_frames(&self) -> usize {
+        self.delay_frames
+    }
+
+    /// Frames old enough to commit — everything buffered beyond the delay.
+    ///
+    /// In conversation mode this is the shorter of the two channels: a frame is only
+    /// committable once both sides of it exist, or they would drift apart.
+    pub fn committable_frames(&self) -> usize {
+        let buffered = if self.channels <= 1 {
+            self.system.len()
+        } else {
+            self.mic.len().min(self.system.len())
+        };
+        buffered.saturating_sub(self.delay_frames)
+    }
+
+    /// Everything still buffered, ignoring the delay. Used to flush at the end of a
+    /// recording, where there is no later audio for the scrub to protect.
+    pub fn pending_frames(&self) -> usize {
+        if self.channels <= 1 {
+            self.system.len()
+        } else {
+            self.mic.len().max(self.system.len())
         }
     }
 
@@ -97,9 +149,11 @@ impl Mixer {
 
     /// Zeroes everything the microphone channel is still holding.
     ///
-    /// Used by the retroactive scrub: audio that has been captured but not yet committed
-    /// to disk is erased in place, keeping the frame count — and therefore the alignment
-    /// with the system channel — untouched.
+    /// This is the retroactive scrub. Audio captured within the last
+    /// [`SCRUB_WINDOW_SECONDS`] but not yet committed to disk is erased in place,
+    /// keeping the frame count — and therefore the alignment with the system channel —
+    /// untouched. Anything already written to the file is beyond reach and is not
+    /// touched; the window is the honest limit of what this can undo.
     pub fn scrub_mic(&mut self) -> usize {
         let count = self.mic.len();
         for sample in self.mic.iter_mut() {
@@ -267,6 +321,73 @@ mod tests {
         mixer.push(Channel::Mic, &vec![0.5; 1_500]);
         assert!(mixer.dropped_frames() > 0);
         assert!(mixer.buffered_frames() <= 1_000);
+    }
+
+    // ---- the scrub window ----
+
+    #[test]
+    fn audio_inside_the_delay_is_not_committable_yet() {
+        let mut mixer = Mixer::with_delay(1_000, 2, 500);
+        mixer.push(Channel::Mic, &vec![0.5; 400]);
+        mixer.push(Channel::System, &vec![0.5; 400]);
+        assert_eq!(
+            mixer.committable_frames(),
+            0,
+            "nothing should be committable while it is still inside the scrub window"
+        );
+
+        mixer.push(Channel::Mic, &vec![0.5; 200]);
+        mixer.push(Channel::System, &vec![0.5; 200]);
+        assert_eq!(mixer.committable_frames(), 100);
+    }
+
+    /// The whole point: audio spoken within the window can still be erased.
+    #[test]
+    fn scrubbing_erases_mic_audio_still_inside_the_window() {
+        let mut mixer = Mixer::with_delay(1_000, 2, 500);
+        mixer.push(Channel::Mic, &vec![0.9; 600]);
+        mixer.push(Channel::System, &vec![0.3; 600]);
+
+        assert_eq!(mixer.scrub_mic(), 600);
+
+        // The 100 frames now old enough to commit carry silence on the left and the
+        // untouched system audio on the right.
+        let frames = mixer.take(100);
+        assert!(frames.iter().step_by(2).all(|s| *s == 0.0), "mic audio survived the scrub");
+        assert!(
+            frames.iter().skip(1).step_by(2).all(|s| (*s - 0.3).abs() < 1e-6),
+            "the scrub disturbed the system channel"
+        );
+    }
+
+    /// The honest limit: audio already committed is beyond reach.
+    #[test]
+    fn scrubbing_cannot_reach_audio_already_taken_for_writing() {
+        let mut mixer = Mixer::with_delay(1_000, 2, 500);
+        mixer.push(Channel::Mic, &vec![0.9; 700]);
+        mixer.push(Channel::System, &vec![0.3; 700]);
+
+        let committed = mixer.take(200);
+        assert!(committed.iter().step_by(2).any(|s| *s != 0.0));
+
+        // Scrubbing afterwards only touches what is left.
+        assert_eq!(mixer.scrub_mic(), 500);
+    }
+
+    #[test]
+    fn a_mixer_with_no_delay_commits_immediately() {
+        let mut mixer = Mixer::new(1_000, 1);
+        mixer.push(Channel::System, &vec![0.5; 10]);
+        assert_eq!(mixer.committable_frames(), 10);
+    }
+
+    #[test]
+    fn pending_frames_covers_everything_still_held_for_the_final_flush() {
+        let mut mixer = Mixer::with_delay(1_000, 2, 500);
+        mixer.push(Channel::Mic, &vec![0.5; 300]);
+        mixer.push(Channel::System, &vec![0.5; 300]);
+        assert_eq!(mixer.committable_frames(), 0);
+        assert_eq!(mixer.pending_frames(), 300, "the tail must still be flushable at stop");
     }
 
     #[test]

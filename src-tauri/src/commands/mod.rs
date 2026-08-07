@@ -7,6 +7,7 @@
 pub mod events;
 pub mod mute;
 pub mod recording;
+pub mod scrub;
 pub mod settings;
 pub mod summary;
 pub mod system;

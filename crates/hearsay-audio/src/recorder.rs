@@ -10,7 +10,7 @@
 
 use crate::mic::MicSource;
 use crate::mix::downmix_to_mono;
-use crate::mixer::{resample_mono, Channel, Mixer};
+use crate::mixer::{resample_mono, Channel, Mixer, SCRUB_WINDOW_SECONDS};
 use crate::source::{AudioFormat, AudioSource, Chunk};
 use crate::wav::WavWriter;
 use crate::{AudioError, HelperSource, Mode, Result, TapTarget};
@@ -114,8 +114,20 @@ impl Recording {
         let output_format = AudioFormat::new(sample_rate, mode.channel_count());
         let writer = WavWriter::create(&path, output_format)?;
 
+        // Conversation mode holds a minute of both channels back so the retroactive
+        // scrub has something to erase. Listen-only has no microphone and therefore
+        // nothing to scrub, so it commits immediately and keeps the on-disk file current.
+        let delay_frames = match mode {
+            Mode::ListenOnly => 0,
+            Mode::Conversation => (sample_rate as usize) * SCRUB_WINDOW_SECONDS as usize,
+        };
+
         let shared = Arc::new(Shared {
-            mixer: Mutex::new(Mixer::new(sample_rate, mode.channel_count())),
+            mixer: Mutex::new(Mixer::with_delay(
+                sample_rate,
+                mode.channel_count(),
+                delay_frames,
+            )),
             status: Mutex::new(RecordingStatus::default()),
             mute_spans: Mutex::new(Vec::new()),
             mute_started_ms: Mutex::new(None),
@@ -130,7 +142,13 @@ impl Recording {
         }
 
         let started = Instant::now();
-        let writer_thread = spawn_writer(writer, output_format, Arc::clone(&shared), started)?;
+        let writer_thread = spawn_writer(
+            writer,
+            output_format,
+            Arc::clone(&shared),
+            started,
+            delay_frames,
+        )?;
 
         Ok(Self {
             shared,
@@ -376,9 +394,9 @@ fn spawn_writer(
     output_format: AudioFormat,
     shared: Arc<Shared>,
     started: Instant,
+    delay_frames: usize,
 ) -> Result<JoinHandle<Result<RecordingOutcome>>> {
     let sample_rate = output_format.sample_rate.max(1) as u64;
-    let channels = output_format.channels.max(1) as usize;
 
     std::thread::Builder::new()
         .name("hearsay-write".into())
@@ -388,16 +406,23 @@ fn spawn_writer(
             loop {
                 let stopping = shared.stop.load(Ordering::Relaxed);
 
-                // How many frames should exist by now, if the file matched real time.
+                // How many frames should exist by now, if the file matched real time —
+                // minus the scrub window, which is deliberately not committed yet.
                 let elapsed = started.elapsed();
-                let target =
+                let elapsed_frames =
                     (elapsed.as_millis() as u64).saturating_mul(sample_rate) / 1000;
+                let target = elapsed_frames.saturating_sub(delay_frames as u64);
                 let already = writer.frames_written();
                 let due = target.saturating_sub(already) as usize;
 
                 if due > 0 {
+                    // Never take more than has aged past the delay, or the scrub window
+                    // would silently shrink under a slow reader.
                     let samples = match shared.mixer.lock() {
-                        Ok(mut mixer) => mixer.take(due),
+                        Ok(mut mixer) => {
+                            let ready = mixer.committable_frames().min(due);
+                            if ready > 0 { mixer.take(ready) } else { Vec::new() }
+                        }
                         Err(_) => Vec::new(),
                     };
 
@@ -409,11 +434,14 @@ fn spawn_writer(
                         writer.write_samples(&samples)?;
 
                         if let Ok(mut status) = shared.status.lock() {
-                            status.elapsed_ms = elapsed.as_millis() as u64;
                             status.frames_written = writer.frames_written();
                             status.peak = peak;
                         }
                     }
+                }
+
+                if let Ok(mut status) = shared.status.lock() {
+                    status.elapsed_ms = elapsed.as_millis() as u64;
                 }
 
                 if stopping {
@@ -422,9 +450,29 @@ fn spawn_writer(
                 std::thread::sleep(WRITE_INTERVAL);
             }
 
+            // Flush the held-back window. Recording has stopped, so there is no later
+            // audio for the scrub to protect — and anything still buffered was captured
+            // and not erased, so it belongs in the file.
+            let remaining = shared
+                .mixer
+                .lock()
+                .map(|mixer| mixer.pending_frames())
+                .unwrap_or(0);
+            if remaining > 0 {
+                let samples = match shared.mixer.lock() {
+                    Ok(mut mixer) => mixer.take(remaining),
+                    Err(_) => Vec::new(),
+                };
+                if !samples.is_empty() {
+                    if samples.iter().any(|s| *s != 0.0) {
+                        produced_audio = true;
+                    }
+                    writer.write_samples(&samples)?;
+                }
+            }
+
             writer.finalize()?;
 
-            let _ = channels; // documented above; the mixer owns interleaving
             Ok(RecordingOutcome {
                 path: writer.path().to_path_buf(),
                 frames: writer.frames_written(),

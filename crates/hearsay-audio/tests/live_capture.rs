@@ -213,3 +213,60 @@ fn conversation_mode_writes_the_mic_left_and_system_right() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// The retroactive scrub, end to end: everything spoken before the scrub is erased
+/// before it ever reaches the file, and everything after it is recorded normally.
+///
+/// The recording is far shorter than the 60-second window, so at the moment of the
+/// scrub the entire session is still in the buffer — which is exactly the case the
+/// feature exists for.
+#[test]
+#[ignore = "opens the microphone — needs macOS microphone permission"]
+fn scrubbing_erases_microphone_audio_before_it_reaches_the_file() {
+    use hearsay_audio::{Mode, Recording};
+
+    let path = std::env::temp_dir().join(format!("hearsay-scrub-{}.wav", std::process::id()));
+    let recording = Recording::start(Mode::Conversation, TapTarget::SystemWide, &path)
+        .expect("conversation recording should start");
+
+    std::thread::sleep(Duration::from_secs(3));
+    let erased = recording.scrub_microphone().expect("scrub should succeed");
+    println!("scrubbed {erased} microphone samples");
+    assert!(erased > 0, "the scrub found nothing buffered to erase");
+
+    std::thread::sleep(Duration::from_secs(3));
+    let outcome = recording.stop().expect("recording should stop cleanly");
+    println!("wrote {} frames ({} ms)", outcome.frames, outcome.duration_ms);
+
+    let reader = hound::WavReader::open(&path).expect("the file should be a readable wav");
+    let spec = reader.spec();
+    let samples: Vec<i16> = reader
+        .into_samples::<i16>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("samples decode");
+
+    let left: Vec<i16> = samples.iter().copied().step_by(2).collect();
+    let rate = spec.sample_rate as usize;
+
+    // The first ~2.5 s of microphone audio was inside the buffer when the scrub ran, so
+    // it must be gone. Stopping short of the 3 s mark leaves room for scheduling jitter
+    // between the scrub and the samples that arrived alongside it.
+    let scrubbed_region = &left[..(rate * 5 / 2).min(left.len())];
+    let survivors = scrubbed_region.iter().filter(|s| **s != 0).count();
+    assert_eq!(
+        survivors, 0,
+        "{survivors} microphone samples survived the scrub — audio the user asked to \
+         erase reached the file"
+    );
+
+    // And the session as a whole still covers real elapsed time: scrubbing erases
+    // content, it does not shorten the recording.
+    let seconds = left.len() as f64 / rate as f64;
+    assert!(
+        seconds > 5.0,
+        "the recording is only {seconds:.1}s — the scrub appears to have dropped frames \
+         instead of zeroing them"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

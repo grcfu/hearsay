@@ -93,6 +93,37 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
       .catch(() => undefined);
   }, [recording]);
 
+  const [scrubbed, setScrubbed] = useState<string | null>(null);
+
+  // The scrub hotkey works while Hearsay is in the background, so confirmation has to
+  // arrive by event. Silently erasing audio with no acknowledgement would leave the user
+  // unsure whether it worked — exactly the wrong feeling for this feature.
+  useEffect(() => {
+    const unlisten = listen<{ erased_ms: number; window_seconds: number }>(
+      "scrub",
+      (message) => {
+        const seconds = Math.round(message.payload.erased_ms / 1000);
+        setScrubbed(
+          seconds > 0
+            ? `Erased the last ${seconds} second${seconds === 1 ? "" : "s"} of your microphone.`
+            : "Nothing to erase yet.",
+        );
+        window.setTimeout(() => setScrubbed(null), 5000);
+      },
+    );
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  const scrub = async () => {
+    try {
+      await invoke("scrub_microphone");
+    } catch (problem) {
+      setError(String((problem as { message?: string })?.message ?? problem));
+    }
+  };
+
   const toggleMute = async () => {
     try {
       setMute(await invoke<{ muted: boolean; applicable: boolean }>("toggle_mute"));
@@ -177,6 +208,17 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
                 {mute.muted ? "Unmute microphone" : "Mute microphone"}
                 <span className="shortcut-hint">⌘⇧M</span>
               </button>
+            ) : null}
+            {mute.applicable ? (
+              <button type="button" className="button mute-button" onClick={scrub}>
+                Erase last 60 seconds
+                <span className="shortcut-hint">⌘⇧X</span>
+              </button>
+            ) : null}
+            {scrubbed ? (
+              <p className="small" style={{ opacity: 0.9, margin: "2px 6px 0" }}>
+                {scrubbed}
+              </p>
             ) : null}
             {mute.muted ? (
               <p className="small" style={{ opacity: 0.8, margin: "2px 6px 0" }}>

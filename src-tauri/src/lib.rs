@@ -66,6 +66,7 @@ pub fn run() {
             commands::mute::mute_state,
             commands::mute::set_mute,
             commands::mute::toggle_mute,
+            commands::scrub::scrub_microphone,
         ])
         .setup(|app| {
             // Recording is driven from the window; without one there is nothing to drive
