@@ -1,0 +1,62 @@
+//! The Tauri shell.
+//!
+//! Commands and state only. Anything that could be tested without a window belongs in
+//! `hearsay-audio` or `hearsay-core`.
+
+mod commands;
+mod state;
+
+use hearsay_core::Database;
+use state::AppState;
+use std::sync::Arc;
+use tauri::Manager;
+
+/// Starts the application.
+///
+/// A failure here — the database will not open, the data directory is unwritable — is
+/// fatal and is reported before the window appears rather than as an empty screen.
+pub fn run() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("HEARSAY_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .init();
+
+    let db = match open_database() {
+        Ok(db) => Arc::new(db),
+        Err(error) => {
+            tracing::error!("could not open the database: {error:#}");
+            eprintln!("Hearsay could not start: {error:#}");
+            std::process::exit(1);
+        }
+    };
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(AppState::new(db))
+        .invoke_handler(tauri::generate_handler![
+            commands::system::system_status,
+            commands::system::request_audio_permission,
+            commands::system::list_audible_apps,
+        ])
+        .setup(|app| {
+            // Recording is driven from the window; without one there is nothing to drive
+            // it, so this is a hard failure rather than a warning.
+            if app.get_webview_window("main").is_none() {
+                return Err("the main window is missing from tauri.conf.json".into());
+            }
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("the Tauri runtime failed to start");
+}
+
+fn open_database() -> anyhow::Result<Database> {
+    let path = hearsay_core::paths::db_path()?;
+    tracing::info!("opening database at {}", path.display());
+    Database::open(path)
+}

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  These strings are what macOS shows in its permission prompts. Without them the
+	  prompt has no explanation, and for audio capture it may not appear at all.
+	-->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Hearsay records your microphone only in conversation mode, which you turn on yourself. In listen-only mode the microphone is never opened.</string>
+
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Hearsay records the audio of the meeting app you choose so it can transcribe it on this machine. Nothing is uploaded.</string>
+
+	<!-- The recorder keeps running while the window is in the background. -->
+	<key>LSUIElement</key>
+	<false/>
+</dict>
+</plist>

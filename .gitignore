@@ -72,3 +72,6 @@ Icon?
 !.vscode/extensions.json
 *.swp
 *~
+
+# Tauri generated schemas
+src-tauri/gen/schemas/
