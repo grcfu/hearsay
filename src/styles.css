@@ -224,7 +224,45 @@ select {
   margin-left: var(--s3);
 }
 
-/* The silent-recording alert. Sits in the bar so it is visible the moment the window is. */
+/*
+ * Any .button placed in the bar.
+ *
+ * .button is white with `color: inherit`, which is correct on the light panes and
+ * invisible here — inside the royal bar `inherit` is white, so it rendered white text on
+ * a white button. Everything in the bar sits on royal, so buttons here are outlined
+ * rather than filled.
+ */
+.topbar .button {
+  background: transparent;
+  color: var(--white);
+  border-color: rgb(255 255 255 / 35%);
+}
+
+.topbar .button:hover:not(:disabled) {
+  border-color: var(--white);
+  background: rgb(255 255 255 / 10%);
+}
+
+/* The primary action in a bar prompt stays filled, so the two are distinguishable. */
+.topbar .button.primary {
+  background: var(--white);
+  color: var(--royal);
+  border-color: var(--white);
+}
+
+/* The calendar prompt and the silent-recording alert. Sit in the bar so they are
+   visible the moment the window is. */
+.bar-prompt {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius-sm);
+  background: rgb(255 255 255 / 8%);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .bar-alert {
   display: flex;
   align-items: center;

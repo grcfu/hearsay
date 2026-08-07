@@ -374,24 +374,25 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
           </button>
         )}
         {meeting && !recording ? (
-          <div className="live-indicator" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-            <span className="small">“{meeting.title}” is starting.</span>
-            <div className="row">
-              <button
-                type="button"
-                className="button"
-                style={{ flex: 1 }}
-                onClick={() => {
-                  setMeeting(null);
-                  void start();
-                }}
-              >
-                Record it
-              </button>
-              <button type="button" className="button" onClick={() => setMeeting(null)}>
-                Not now
-              </button>
-            </div>
+          <div className="bar-prompt">
+            <span>“{meeting.title}” is starting.</span>
+            <button
+              type="button"
+              className="button primary small"
+              onClick={() => {
+                setMeeting(null);
+                void start();
+              }}
+            >
+              Record it
+            </button>
+            <button
+              type="button"
+              className="button small"
+              onClick={() => setMeeting(null)}
+            >
+              Not now
+            </button>
           </div>
         ) : null}
         {error ? (
