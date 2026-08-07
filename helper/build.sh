@@ -30,6 +30,7 @@ swiftc \
   -framework CoreAudio \
   -framework AudioToolbox \
   -framework AppKit \
+  -framework CoreGraphics \
   -Xlinker -sectcreate \
   -Xlinker __TEXT \
   -Xlinker __info_plist \

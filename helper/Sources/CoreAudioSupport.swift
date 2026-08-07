@@ -10,6 +10,7 @@ enum HelperError: Error, CustomStringConvertible {
     case coreAudio(op: String, status: OSStatus)
     case noSuchProcess(String)
     case usage(String)
+    case permissionDenied
 
     var description: String {
         switch self {
@@ -19,6 +20,8 @@ enum HelperError: Error, CustomStringConvertible {
             return "no audio process matched \(what)"
         case let .usage(message):
             return message
+        case .permissionDenied:
+            return "macOS has not granted permission to capture system audio"
         }
     }
 
@@ -29,6 +32,7 @@ enum HelperError: Error, CustomStringConvertible {
         case .usage: return 64  // EX_USAGE
         case .noSuchProcess: return 69  // EX_UNAVAILABLE
         case .coreAudio: return 70  // EX_SOFTWARE
+        case .permissionDenied: return 77  // EX_NOPERM
         }
     }
 }
@@ -127,4 +131,21 @@ func readStringProperty(
 /// for machine-readable output (JSON for `--list`, raw PCM when capturing).
 func log(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
+/// Writes one JSON object per line to stderr.
+///
+/// stderr carries two kinds of line: JSON events, which always start with `{`, and plain
+/// human text. Rust attempts to parse each line as JSON and treats anything that fails as
+/// a log line, so the two can be interleaved freely.
+func emit(_ type: String, _ fields: [String: Any] = [:]) {
+    var payload = fields
+    payload["type"] = type
+    guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+    else {
+        log("could not encode \(type) event")
+        return
+    }
+    FileHandle.standardError.write(data)
+    FileHandle.standardError.write(Data("\n".utf8))
 }

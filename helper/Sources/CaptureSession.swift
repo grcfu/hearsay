@@ -2,6 +2,21 @@ import AudioToolbox
 import CoreAudio
 import Foundation
 
+/// What the tap has produced so far. `nonZeroSamples` is the number that matters: a tap
+/// without permission produces frames at exactly the right rate, all of them zero.
+struct LevelStats {
+    var frames: UInt64 = 0
+    var samples: UInt64 = 0
+    var nonZeroSamples: UInt64 = 0
+    var peak: Float = 0
+    var intervalPeak: Float = 0
+    var sumSquares: Double = 0
+
+    var rms: Double {
+        samples == 0 ? 0 : (sumSquares / Double(samples)).squareRoot()
+    }
+}
+
 /// What to tap.
 enum TapTarget {
     /// Only these processes. Preferred: music playing alongside the meeting stays out
@@ -36,6 +51,14 @@ final class CaptureSession {
 
     /// Set when the output pipe closes; the run loop notices and exits cleanly.
     private var pipeClosed = false
+
+    /// Running tally of what the tap has actually produced. The whole point is to be
+    /// able to say "this ran for 40 seconds and every single sample was zero" instead of
+    /// quietly writing 40 seconds of silence to disk.
+    private var stats = LevelStats()
+
+    /// Whether PCM should reach stdout. `--probe` measures without emitting.
+    var writesToStdout = true
 
     // MARK: - Setup
 
@@ -172,7 +195,9 @@ final class CaptureSession {
             // One buffer already holding frames as L,R,L,R… — hand it straight over.
             let buffer = list[0]
             guard let data = buffer.mData, buffer.mDataByteSize > 0 else { return }
-            writeToStdout(data, Int(buffer.mDataByteSize))
+            let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+            measure(data.assumingMemoryBound(to: Float.self), count: count, channels: channels)
+            if writesToStdout { writeToStdout(data, Int(buffer.mDataByteSize)) }
             return
         }
 
@@ -192,7 +217,46 @@ final class CaptureSession {
             }
         }
 
-        writeToStdout(scratch, framesToWrite * channels * MemoryLayout<Float>.size)
+        measure(scratch, count: framesToWrite * channels, channels: channels)
+        if writesToStdout {
+            writeToStdout(scratch, framesToWrite * channels * MemoryLayout<Float>.size)
+        }
+    }
+
+    /// Folds one buffer into the running tally. Computed into locals first so the lock is
+    /// held for a few instructions rather than for the whole scan — this runs on the
+    /// audio thread and must not stall it.
+    private func measure(_ samples: UnsafePointer<Float>, count: Int, channels: Int) {
+        guard count > 0 else { return }
+        var nonZero: UInt64 = 0
+        var peak: Float = 0
+        var sumSquares = 0.0
+        for index in 0..<count {
+            let value = samples[index]
+            if value != 0 { nonZero += 1 }
+            let magnitude = abs(value)
+            if magnitude > peak { peak = magnitude }
+            sumSquares += Double(value) * Double(value)
+        }
+
+        lock.lock()
+        stats.frames += UInt64(count / max(channels, 1))
+        stats.samples += UInt64(count)
+        stats.nonZeroSamples += nonZero
+        stats.sumSquares += sumSquares
+        if peak > stats.peak { stats.peak = peak }
+        if peak > stats.intervalPeak { stats.intervalPeak = peak }
+        lock.unlock()
+    }
+
+    /// Cumulative stats. Passing `resetInterval` clears the short-window peak so the
+    /// caller can emit a live level meter.
+    func snapshot(resetInterval: Bool = false) -> LevelStats {
+        lock.lock()
+        defer { lock.unlock() }
+        let current = stats
+        if resetInterval { stats.intervalPeak = 0 }
+        return current
     }
 
     /// A pipe write can be partial. Loop until it is all out, and treat a closed pipe as
@@ -227,18 +291,15 @@ final class CaptureSession {
     /// One line of JSON on stderr, before any PCM reaches stdout. Rust reads this to
     /// learn the sample rate and channel count it is about to receive.
     private func emitFormat() {
-        let payload: [String: Any] = [
-            "type": "format",
-            "sample_rate": format.mSampleRate,
-            "channels": Int(format.mChannelsPerFrame),
-            "bits_per_sample": Int(format.mBitsPerChannel),
-            "encoding": "f32le",
-            "interleaved": true,
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-        else { return }
-        FileHandle.standardError.write(data)
-        FileHandle.standardError.write(Data("\n".utf8))
+        emit(
+            "format",
+            [
+                "sample_rate": format.mSampleRate,
+                "channels": Int(format.mChannelsPerFrame),
+                "bits_per_sample": Int(format.mBitsPerChannel),
+                "encoding": "f32le",
+                "interleaved": true,
+            ])
     }
 
     // MARK: - Teardown
