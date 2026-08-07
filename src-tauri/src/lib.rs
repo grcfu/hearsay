@@ -68,6 +68,7 @@ pub fn run() {
             commands::events::delete_event,
             commands::settings::settings,
             commands::settings::save_api_key,
+            commands::settings::set_speaker_name,
             commands::settings::clear_api_key,
             commands::settings::save_gemini_key,
             commands::settings::clear_gemini_key,

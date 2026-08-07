@@ -73,7 +73,8 @@ pub struct ActionItem {
 
 impl Summary {
     /// The full markdown to store, with action items appended as a section.
-    pub fn to_markdown(&self) -> String {
+    pub fn to_markdown(&self, speaker: Option<&str>) -> String {
+        let speaker = speaker_or_default(speaker);
         let mut markdown = self.summary_md.trim().to_string();
         if self.action_items.is_empty() {
             return markdown;
@@ -81,7 +82,7 @@ impl Summary {
         markdown.push_str("\n\n## Action items\n\n");
         for item in &self.action_items {
             let owner = match item.owner.as_str() {
-                "you" => "You",
+                "you" => speaker,
                 "them" => "Them",
                 _ => "Unassigned",
             };
@@ -139,8 +140,10 @@ pub fn summarize(
     segments: &[Segment],
     mute_spans: &[(i64, i64)],
     model: &str,
+    speaker: Option<&str>,
 ) -> Result<Summary> {
-    let transcript = render_transcript(segments, mute_spans);
+    let speaker = speaker_or_default(speaker);
+    let transcript = render_transcript(segments, mute_spans, Some(speaker));
     if transcript.trim().is_empty() {
         return Err(anyhow!(
             "this recording has no transcript yet, and summaries are written from the \
@@ -149,12 +152,12 @@ pub fn summarize(
     }
 
     match Provider::current() {
-        Provider::Anthropic => summarize_anthropic(&transcript, model),
-        Provider::Gemini => summarize_gemini(&transcript, model),
+        Provider::Anthropic => summarize_anthropic(&transcript, model, speaker),
+        Provider::Gemini => summarize_gemini(&transcript, model, speaker),
     }
 }
 
-fn summarize_anthropic(transcript: &str, model: &str) -> Result<Summary> {
+fn summarize_anthropic(transcript: &str, model: &str, speaker: &str) -> Result<Summary> {
     let key = secrets::api_key()?.ok_or_else(|| {
         anyhow!(
             "no Anthropic API key is set. Add one in settings — everything else in \
@@ -167,7 +170,7 @@ fn summarize_anthropic(transcript: &str, model: &str) -> Result<Summary> {
         "max_tokens": MAX_TOKENS,
         // Ask the API to fall back rather than return a refusal.
         "fallbacks": "default",
-        "system": SYSTEM_PROMPT,
+        "system": system_prompt(speaker),
         // A JSON schema instead of asking for markdown and parsing it back out: the
         // title and the action items arrive as separate fields rather than as headings
         // this code would have to find.
@@ -179,11 +182,7 @@ fn summarize_anthropic(transcript: &str, model: &str) -> Result<Summary> {
         },
         "messages": [{
             "role": "user",
-            "content": format!(
-                "Here is the transcript of a meeting.\n\n\
-                 `You` is the person who recorded it; `Them` is everyone else.\n\n\
-                 <transcript>\n{transcript}\n</transcript>"
-            ),
+            "content": user_prompt(transcript, speaker),
         }],
     });
 
@@ -257,7 +256,7 @@ fn summarize_anthropic(transcript: &str, model: &str) -> Result<Summary> {
 /// A different shape entirely — the schema lives in `generationConfig.responseSchema`,
 /// the system prompt in `systemInstruction`, and the answer comes back nested under
 /// `candidates`. Only this function knows any of that.
-fn summarize_gemini(transcript: &str, model: &str) -> Result<Summary> {
+fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summary> {
     let key = secrets::gemini_key()?.ok_or_else(|| {
         anyhow!(
             "no Gemini API key is set. Add one in settings — everything else in Hearsay \
@@ -266,14 +265,10 @@ fn summarize_gemini(transcript: &str, model: &str) -> Result<Summary> {
     })?;
 
     let request = serde_json::json!({
-        "systemInstruction": { "parts": [{ "text": SYSTEM_PROMPT }] },
+        "systemInstruction": { "parts": [{ "text": system_prompt(speaker) }] },
         "contents": [{
             "role": "user",
-            "parts": [{ "text": format!(
-                "Here is the transcript of a meeting.\n\n\
-                 `You` is the person who recorded it; `Them` is everyone else.\n\n\
-                 <transcript>\n{transcript}\n</transcript>"
-            )}],
+            "parts": [{ "text": user_prompt(transcript, speaker) }],
         }],
         "generationConfig": {
             "responseMimeType": "application/json",
@@ -409,36 +404,95 @@ fn schema() -> serde_json::Value {
     })
 }
 
+/// The instructions the model works from, with `{name}` standing in for the recorder.
+///
+/// Kept as one editable string rather than assembled from fragments: this is the file
+/// someone opens when the summaries are not shaped the way they want, and a prompt split
+/// across a dozen `push_str` calls is a prompt nobody edits.
 const SYSTEM_PROMPT: &str = "\
-You summarise meeting transcripts for the person who recorded them.
+You summarise recordings for {name}, who was there and recorded them.
+
+In the transcript, `{name}` is them and `Them` is everyone else.
 
 The transcript comes from automatic speech recognition, so expect mangled names, wrong \
 homophones, and missing punctuation. Read through those errors rather than quoting them.
 
-Write the summary for someone who was in the meeting and wants to remember what happened \
-— not for someone who missed it. Lead with what was decided and what changed. Leave out \
-the greetings, the scheduling chatter, and anything that would be obvious to a person who \
-was there.
+Write for someone who was in the room and wants to remember it — not for someone who \
+missed it. Leave out the greetings, the scheduling chatter, and anything that would be \
+obvious to a person who was there.
+
+## Shape
+
+Write `summary_md` as bullet points grouped under `##` headings. Not paragraphs.
+
+Choose two to four headings that name what this particular conversation was actually \
+about. Do not reuse a fixed template. A recruiting session might want `The role` and \
+`How to apply`; a coffee chat might want `About Dana` and `Advice she gave`; a project \
+meeting might want `What we decided` and `Still open`. Name the heading after the thing \
+discussed, so the summary is skimmable months later. Never write a heading you have \
+nothing substantial to put under.
+
+Each bullet is one fact, one line. Nest at most one level deep.
+
+End with a `## Worth remembering` section: the small concrete details that are easy to \
+forget and useful later — names and roles, companies, deadlines and dates, numbers, \
+tools or links mentioned, and the personal details worth recalling next time, like where \
+someone studied or what they are working on. Omit the section entirely if the transcript \
+genuinely has none.
+
+Do not write an action items heading. Action items are a separate field and are rendered \
+on their own.
+
+## Accuracy
 
 Only record what the transcript supports. If something was discussed without being \
 settled, say it was left open rather than inventing a resolution. Where the transcript is \
 too garbled to interpret, leave it out instead of guessing.
 
 Action items are commitments someone actually made, not topics that were mentioned. \
-Attribute each to `you` (the person recording) or `them`, and use `unassigned` when \
-nobody clearly took it — never guess a name.
+Attribute each to `you` (meaning {name}) or `them`, and use `unassigned` when nobody \
+clearly took it — never guess a name.
 
-A line reading `[mic muted]` means the recorder deliberately muted their microphone. \
-Their side of the conversation is missing there. Do not speculate about what was said.
+A line reading `[mic muted]` means {name} deliberately muted their microphone. Their side \
+of the conversation is missing there. Do not speculate about what was said.
 
-Use sentence case in headings. Keep it proportionate: a ten-minute call needs a short \
-paragraph, not a structured report.";
+Use sentence case in headings. Keep it proportionate: a ten-minute call needs a handful \
+of bullets, not a report.";
+
+/// The default label for the recorder when no name has been set.
+pub const DEFAULT_SPEAKER: &str = "You";
+
+/// Resolves the name to address the recorder by, falling back to [`DEFAULT_SPEAKER`].
+fn speaker_or_default(speaker: Option<&str>) -> &str {
+    match speaker {
+        Some(name) if !name.trim().is_empty() => name.trim(),
+        _ => DEFAULT_SPEAKER,
+    }
+}
+
+fn system_prompt(speaker: &str) -> String {
+    SYSTEM_PROMPT.replace("{name}", speaker)
+}
+
+/// The user turn. Separate from the system prompt so the transcript is clearly data.
+fn user_prompt(transcript: &str, speaker: &str) -> String {
+    format!(
+        "Here is the transcript of a recording.\n\n\
+         `{speaker}` is the person who recorded it; `Them` is everyone else.\n\n\
+         <transcript>\n{transcript}\n</transcript>"
+    )
+}
 
 /// Renders segments and mute spans into the text the model reads.
 ///
 /// Timestamps are included so the summary can be traced back to the recording, and mute
 /// spans are marked in place so a gap in the conversation is never mistaken for silence.
-fn render_transcript(segments: &[Segment], mute_spans: &[(i64, i64)]) -> String {
+fn render_transcript(
+    segments: &[Segment],
+    mute_spans: &[(i64, i64)],
+    speaker: Option<&str>,
+) -> String {
+    let speaker_label = speaker_or_default(speaker);
     #[derive(Debug)]
     enum Line<'a> {
         Spoken(&'a Segment),
@@ -456,7 +510,7 @@ fn render_transcript(segments: &[Segment], mute_spans: &[(i64, i64)]) -> String 
     for line in lines {
         match line {
             Line::Spoken(segment) => {
-                let speaker = if segment.channel == "mic" { "You" } else { "Them" };
+                let speaker = if segment.channel == "mic" { speaker_label } else { "Them" };
                 out.push_str(&format!(
                     "[{}] {speaker}: {}\n",
                     clock(segment.start_ms),
@@ -491,6 +545,37 @@ mod tests {
         }
     }
 
+    /// The name is not decoration: it goes into the prompt, so a summary that says "You"
+    /// when a name is set means the plumbing broke.
+    #[test]
+    fn the_prompt_addresses_the_recorder_by_name() {
+        let prompt = system_prompt("Grace");
+        assert!(prompt.contains("summarise recordings for Grace"));
+        assert!(!prompt.contains("{name}"), "a placeholder survived: {prompt}");
+        assert!(system_prompt(DEFAULT_SPEAKER).contains("recordings for You"));
+    }
+
+    #[test]
+    fn an_unset_or_blank_name_falls_back_to_you() {
+        assert_eq!(speaker_or_default(None), "You");
+        assert_eq!(speaker_or_default(Some("   ")), "You");
+        assert_eq!(speaker_or_default(Some("  Grace ")), "Grace");
+    }
+
+    #[test]
+    fn action_items_are_attributed_to_the_name() {
+        let summary = Summary {
+            title: "T".into(),
+            summary_md: "## Notes\n\n- A thing".into(),
+            action_items: vec![ActionItem {
+                text: "Send the deck".into(),
+                owner: "you".into(),
+            }],
+        };
+        assert!(summary.to_markdown(Some("Grace")).contains("**Grace** — Send the deck"));
+        assert!(summary.to_markdown(None).contains("**You** — Send the deck"));
+    }
+
     #[test]
     fn the_transcript_labels_who_was_speaking() {
         let rendered = render_transcript(
@@ -499,9 +584,10 @@ mod tests {
                 segment(2, "mic", 5_000, "Thanks for having me"),
             ],
             &[],
+            Some("Grace"),
         );
         assert!(rendered.contains("[00:00] Them: Welcome everyone"));
-        assert!(rendered.contains("[00:05] You: Thanks for having me"));
+        assert!(rendered.contains("[00:05] Grace: Thanks for having me"));
     }
 
     /// A muted stretch must reach the model, or it will summarise a gap as if nothing
@@ -514,6 +600,7 @@ mod tests {
                 segment(2, "system", 90_000, "Right, moving on"),
             ],
             &[(10_000, 65_000)],
+            None,
         );
         assert!(
             rendered.contains("[00:10] [mic muted until 01:05]"),
@@ -542,9 +629,9 @@ mod tests {
             ],
         };
 
-        let markdown = summary.to_markdown();
+        let markdown = summary.to_markdown(Some("Grace"));
         assert!(markdown.contains("## Action items"));
-        assert!(markdown.contains("- **You** — Draft the rollout plan"));
+        assert!(markdown.contains("- **Grace** — Draft the rollout plan"));
         assert!(markdown.contains("- **Unassigned** — Confirm the freeze window"));
     }
 
@@ -555,7 +642,7 @@ mod tests {
             summary_md: "Nothing was decided.".into(),
             action_items: vec![],
         };
-        assert!(!summary.to_markdown().contains("Action items"));
+        assert!(!summary.to_markdown(Some("Grace")).contains("Action items"));
     }
 
     #[test]

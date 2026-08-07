@@ -82,6 +82,16 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT INTO segments_fts(rowid, text) SELECT id, text FROM segments;
     "#,
+    // 3: small key/value store for preferences.
+    //
+    // Not the Keychain: these are not secrets, and a name sitting beside an API key
+    // would blur what the Keychain is for.
+    r#"
+    CREATE TABLE preferences (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// A recording session and everything known about it.
@@ -425,6 +435,38 @@ impl Database {
                 }
             }
             transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    // -- preferences -------------------------------------------------------------
+
+    /// Reads a preference. `None` when it has never been set.
+    pub fn preference(&self, key: &str) -> Result<Option<String>> {
+        self.with_connection(|connection| {
+            let value = connection
+                .query_row(
+                    "SELECT value FROM preferences WHERE key = ?1",
+                    params![key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            Ok(value)
+        })
+    }
+
+    /// Sets a preference, or clears it when given an empty string.
+    pub fn set_preference(&self, key: &str, value: &str) -> Result<()> {
+        self.with_connection(|connection| {
+            if value.trim().is_empty() {
+                connection.execute("DELETE FROM preferences WHERE key = ?1", params![key])?;
+            } else {
+                connection.execute(
+                    "INSERT INTO preferences(key, value) VALUES(?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value.trim()],
+                )?;
+            }
             Ok(())
         })
     }
@@ -835,6 +877,22 @@ mod tests {
         let (db, _) = with_transcript();
         db.rebuild_search_index().expect("rebuild works");
         assert_eq!(db.search("migration", 20).expect("search runs").len(), 2);
+    }
+
+    #[test]
+    fn preferences_round_trip_and_clear() {
+        let (db, _) = seeded();
+        assert_eq!(db.preference("speaker_name").expect("read"), None);
+
+        db.set_preference("speaker_name", "  Grace  ").expect("write");
+        assert_eq!(
+            db.preference("speaker_name").expect("read").as_deref(),
+            Some("Grace"),
+            "the stored value should be trimmed"
+        );
+
+        db.set_preference("speaker_name", "").expect("clear");
+        assert_eq!(db.preference("speaker_name").expect("read"), None);
     }
 
     #[test]

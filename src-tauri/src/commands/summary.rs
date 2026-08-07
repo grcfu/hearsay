@@ -10,6 +10,9 @@ use hearsay_core::Database;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
+/// Preference key holding what the summary should call the person recording.
+pub const SPEAKER_NAME_KEY: &str = "speaker_name";
+
 /// Starts summary generation for an event.
 ///
 /// Returns as soon as the work is queued. Progress and the result arrive as `summary`
@@ -63,10 +66,12 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64) {
 
         // Each provider names its own model; the caller does not choose one.
         let model = Provider::current().default_model();
-        let summary = summary::summarize(&segments, &spans, model)?;
+        // The name the summary should call the recorder by. Unset simply means "You".
+        let speaker = db.preference(SPEAKER_NAME_KEY)?;
+        let summary = summary::summarize(&segments, &spans, model, speaker.as_deref())?;
         db.set_summary(
             event_id,
-            &summary.to_markdown(),
+            &summary.to_markdown(speaker.as_deref()),
             Some(summary.title.as_str()),
             model,
         )?;

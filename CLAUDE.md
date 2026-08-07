@@ -200,6 +200,31 @@ FTS5 over `segments.text`.
 
 ---
 
+## 8a. Summaries
+
+The prompt lives in `crates/hearsay-core/src/summary.rs` as one editable string. Its rules:
+
+- **Bullets under headings, not paragraphs.** Two to four `##` sections, named after what
+  *this* conversation was about — not a fixed template. A recruiting session gets
+  "The role" and "How to apply"; a coffee chat gets "About Dana" and "Advice she gave".
+- **A closing `Worth remembering` section** for the details that are easy to lose: names,
+  roles, deadlines, numbers, and the personal things worth recalling next time. Omitted
+  when the transcript has none.
+- **Action items are a separate schema field**, never a heading the model writes. Owner is
+  an enum — `you` / `them` / `unassigned`. Never a guessed name.
+- **Nothing invented.** Undecided stays undecided; garbled stays out. A `[mic muted]` span
+  is passed to the model and explicitly not to be speculated about.
+
+The recorder is addressed **by name**, set in Settings and stored in `preferences`
+(a preference, not a secret — it is written into every prompt, so it does not belong in
+the Keychain). Unset falls back to "You". The name is used in the transcript labels the
+model reads and in rendered action items.
+
+Structure is enforced by a JSON schema on both providers, so summaries are never parsed
+out of prose.
+
+---
+
 ## 9. Secrets
 
 Summary API keys live in the **macOS Keychain** via the `keyring` crate. Either

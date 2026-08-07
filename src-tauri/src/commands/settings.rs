@@ -1,8 +1,10 @@
 //! Settings, which at this point means the API key and where things live on disk.
 
-use crate::state::CommandResult;
+use crate::commands::summary::SPEAKER_NAME_KEY;
+use crate::state::{AppState, CommandResult};
 use hearsay_core::secrets;
 use serde::Serialize;
+use tauri::State;
 
 /// What settings looks like. Note what is absent: the key itself never crosses this
 /// boundary, only whether one exists.
@@ -12,6 +14,8 @@ pub struct Settings {
     pub has_gemini_key: bool,
     /// "anthropic" or "gemini".
     pub provider: String,
+    /// What summaries call the person recording. Empty means the default, "You".
+    pub speaker_name: String,
     pub data_dir: String,
     pub recordings_dir: String,
     pub models_dir: String,
@@ -19,8 +23,9 @@ pub struct Settings {
 }
 
 #[tauri::command]
-pub fn settings() -> CommandResult<Settings> {
+pub fn settings(state: State<'_, AppState>) -> CommandResult<Settings> {
     Ok(Settings {
+        speaker_name: state.db.preference(SPEAKER_NAME_KEY)?.unwrap_or_default(),
         has_api_key: secrets::has_api_key(),
         has_gemini_key: secrets::has_gemini_key(),
         provider: secrets::summary_provider(),
@@ -29,6 +34,16 @@ pub fn settings() -> CommandResult<Settings> {
         models_dir: hearsay_core::paths::models_dir()?.display().to_string(),
         transcription_available: hearsay_core::transcribe::SidecarPaths::is_available(),
     })
+}
+
+/// Sets the name summaries should use for the person recording.
+///
+/// Stored in the database rather than the Keychain: it is a preference, not a secret,
+/// and it is written into every prompt.
+#[tauri::command]
+pub fn set_speaker_name(state: State<'_, AppState>, name: String) -> CommandResult<()> {
+    state.db.set_preference(SPEAKER_NAME_KEY, &name)?;
+    Ok(())
 }
 
 /// Saves the API key to the macOS Keychain.

@@ -7,6 +7,7 @@ interface Settings {
   has_api_key: boolean;
   has_gemini_key: boolean;
   provider: string;
+  speaker_name: string;
   data_dir: string;
   recordings_dir: string;
   models_dir: string;
@@ -28,12 +29,21 @@ interface Props {
 export function SettingsPane({ status, onStatusChange }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [draftKey, setDraftKey] = useState("");
+  const [draftName, setDraftName] = useState("");
+  // Set once from the loaded settings and then left alone, so typing is not fought by a
+  // reload landing mid-edit.
+  const [, setNameLoaded] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setSettings(await invoke<Settings>("settings"));
+      const loaded = await invoke<Settings>("settings");
+      setSettings(loaded);
+      setNameLoaded((already) => {
+        if (!already) setDraftName(loaded.speaker_name);
+        return true;
+      });
     } catch (problem) {
       setError(String((problem as { message?: string })?.message ?? problem));
     }
@@ -96,6 +106,34 @@ export function SettingsPane({ status, onStatusChange }: Props) {
           </p>
 
           <div className="panel" style={{ marginTop: 12 }}>
+            <div className="row" style={{ marginBottom: 10 }}>
+              <strong>Call me</strong>
+              <span className="spacer" />
+              <input
+                className="search-input"
+                style={{ maxWidth: 220 }}
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="You"
+                value={draftName}
+                onChange={(changed) => setDraftName(changed.target.value)}
+                onBlur={async () => {
+                  if (draftName === (settings?.speaker_name ?? "")) return;
+                  try {
+                    await invoke("set_speaker_name", { name: draftName });
+                    await load();
+                  } catch (problem) {
+                    setError(String((problem as { message?: string })?.message ?? problem));
+                  }
+                }}
+              />
+            </div>
+            <p className="muted small" style={{ marginTop: 0, marginBottom: 14 }}>
+              Summaries and action items will use this name instead of &ldquo;you&rdquo;.
+              Leave it empty to keep &ldquo;you&rdquo;.
+            </p>
+
             <div className="row" style={{ marginBottom: 10 }}>
               <strong>Summaries are written by</strong>
               <span className="spacer" />
