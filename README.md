@@ -87,11 +87,26 @@ There is no auto-updater on purpose — an updater checks a server on every laun
 "no update checks" is one of this project's non-negotiables. This script does the same
 job from the source already on your disk.
 
-**If the permission banner appears after a rebuild**, use `--reset-tcc`. The app is
-ad-hoc signed, and macOS binds permission grants to a signature hash that changes on
-every build — so the System Settings toggle can look switched on while pointing at a
-build that no longer exists. A paid Apple Developer certificate is the only permanent
-fix; until then, resetting re-binds the grant to the current build.
+**Permissions survive rebuilds if you have a signing identity.** macOS identifies an app
+by its *designated requirement*. Ad-hoc signing makes that a content hash, which changes
+on every build — so each rebuild looks like a new app and the permission must be granted
+again. Signing with a certificate makes it bundle ID + certificate instead, which does
+not change when the code does.
+
+`install.sh` finds a code-signing identity in your keychain and uses it automatically,
+and tells you which case you are in:
+
+```
+identified by certificate — permission grants persist across rebuilds.
+```
+
+An **Apple Development** identity is enough, and it is free with any Apple ID — no paid
+Developer Program required. Create one in Xcode → Settings → Accounts → Manage
+Certificates → **+** → Apple Development. Override the choice with
+`HEARSAY_SIGNING_IDENTITY="..."` if you have several.
+
+Without an identity the build falls back to ad-hoc, and `--reset-tcc` is the way to clear
+a stale grant after each rebuild.
 
 ### Keep the checkout
 
