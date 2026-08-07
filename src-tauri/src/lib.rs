@@ -67,6 +67,10 @@ pub fn run() {
             commands::mute::set_mute,
             commands::mute::toggle_mute,
             commands::scrub::scrub_microphone,
+            commands::calendar::calendar_status,
+            commands::calendar::connect_calendar,
+            commands::calendar::disconnect_calendar,
+            commands::calendar::link_to_calendar,
         ])
         .setup(|app| {
             // Recording is driven from the window; without one there is nothing to drive
@@ -79,6 +83,7 @@ pub fn run() {
             // while the user is looking at their meeting app instead of at Hearsay.
             tray::build(app.handle())?;
             shortcuts::register(app.handle());
+            commands::calendar::spawn_auto_arm(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

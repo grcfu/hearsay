@@ -14,8 +14,69 @@ const SERVICE: &str = "com.hearsay.app";
 /// Account name within the service.
 const ACCOUNT: &str = "anthropic-api-key";
 
+/// Google OAuth client details, supplied by the user.
+const CALENDAR_CLIENT: &str = "google-calendar-client";
+/// Google OAuth tokens. Refresh tokens are long-lived credentials and belong in the
+/// Keychain for exactly the same reasons the API key does.
+const CALENDAR_TOKENS: &str = "google-calendar-tokens";
+
 fn entry() -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, ACCOUNT).context("could not reach the macOS Keychain")
+    named_entry(ACCOUNT)
+}
+
+fn named_entry(account: &str) -> Result<keyring::Entry> {
+    keyring::Entry::new(SERVICE, account).context("could not reach the macOS Keychain")
+}
+
+fn read(account: &str) -> Result<Option<String>> {
+    match named_entry(account)?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!(
+            "could not read {account} from the Keychain: {error}"
+        )),
+    }
+}
+
+fn write(account: &str, value: &str) -> Result<()> {
+    named_entry(account)?
+        .set_password(value)
+        .with_context(|| format!("could not save {account} to the Keychain"))
+}
+
+fn remove(account: &str) -> Result<()> {
+    match named_entry(account)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!(
+            "could not remove {account} from the Keychain: {error}"
+        )),
+    }
+}
+
+/// The user's Google OAuth client details, as stored JSON.
+pub fn calendar_client() -> Result<Option<String>> {
+    read(CALENDAR_CLIENT)
+}
+
+pub fn set_calendar_client(value: &str) -> Result<()> {
+    write(CALENDAR_CLIENT, value)
+}
+
+pub fn clear_calendar_client() -> Result<()> {
+    remove(CALENDAR_CLIENT)
+}
+
+/// Google OAuth tokens, as stored JSON.
+pub fn calendar_tokens() -> Result<Option<String>> {
+    read(CALENDAR_TOKENS)
+}
+
+pub fn set_calendar_tokens(value: &str) -> Result<()> {
+    write(CALENDAR_TOKENS, value)
+}
+
+pub fn clear_calendar_tokens() -> Result<()> {
+    remove(CALENDAR_TOKENS)
 }
 
 /// Stores the key, replacing any existing one.

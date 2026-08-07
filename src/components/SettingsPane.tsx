@@ -172,6 +172,17 @@ export function SettingsPane({ status, onStatusChange }: Props) {
           </div>
         </section>
 
+        <section style={{ marginBottom: 28 }}>
+          <h2>Calendar</h2>
+          <p className="muted small" style={{ marginTop: 4 }}>
+            Optional. Connecting Google Calendar lets Hearsay name recordings after the
+            meeting they belong to and offer to start recording when one begins. It is
+            read-only and reads titles and times only — nothing is ever uploaded, and no
+            recording, transcript or summary is sent to Google.
+          </p>
+          <CalendarSection />
+        </section>
+
         <section>
           <h2>On disk</h2>
           <div className="panel" style={{ marginTop: 12 }}>
@@ -182,6 +193,131 @@ export function SettingsPane({ status, onStatusChange }: Props) {
         </section>
       </div>
     </>
+  );
+}
+
+/**
+ * Connecting the calendar.
+ *
+ * Hearsay ships no OAuth client of its own — embedding one would route every user's
+ * calendar access through credentials they do not control. The user creates a Desktop
+ * client in Google Cloud Console and pastes it here; it is stored in the Keychain.
+ */
+function CalendarSection() {
+  const [connected, setConnected] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const status = await invoke<{ connected: boolean }>("calendar_status");
+      setConnected(status.connected);
+    } catch {
+      setConnected(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const connect = async () => {
+    setBusy(true);
+    setFailure(null);
+    setNote("A browser window has opened. Finish signing in to Google there.");
+    try {
+      await invoke("connect_calendar", { clientId, clientSecret });
+      setClientId("");
+      setClientSecret("");
+      setNote("Connected. Hearsay can read your calendar; it cannot change it.");
+      await load();
+    } catch (problem) {
+      setNote(null);
+      setFailure(String((problem as { message?: string })?.message ?? problem));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    try {
+      await invoke("disconnect_calendar");
+      setNote("Disconnected. Revoke Hearsay in your Google account to remove it there too.");
+      await load();
+    } catch (problem) {
+      setFailure(String((problem as { message?: string })?.message ?? problem));
+    }
+  };
+
+  return (
+    <div className="panel" style={{ marginTop: 12 }}>
+      <div className="row" style={{ marginBottom: 10 }}>
+        <strong>Google Calendar</strong>
+        <span className="spacer" />
+        <span className="small muted">{connected ? "Connected, read-only" : "Not connected"}</span>
+      </div>
+
+      {connected ? (
+        <button type="button" className="button destructive" onClick={disconnect}>
+          Disconnect
+        </button>
+      ) : (
+        <>
+          <p className="small muted" style={{ margin: "0 0 8px" }}>
+            Create an OAuth client of type <strong>Desktop app</strong> in Google Cloud
+            Console, enable the Calendar API, and paste its details here.{" "}
+            <button
+              type="button"
+              className="link"
+              onClick={() => void openUrl("https://console.cloud.google.com/apis/credentials")}
+            >
+              Open Google Cloud Console
+            </button>
+          </p>
+          <div className="row" style={{ marginBottom: 8 }}>
+            <input
+              className="search-input"
+              placeholder="Client ID"
+              autoComplete="off"
+              value={clientId}
+              onChange={(changed) => setClientId(changed.target.value)}
+            />
+          </div>
+          <div className="row">
+            <input
+              className="search-input"
+              type="password"
+              placeholder="Client secret"
+              autoComplete="off"
+              value={clientSecret}
+              onChange={(changed) => setClientSecret(changed.target.value)}
+            />
+            <button
+              type="button"
+              className="button primary"
+              disabled={busy || !clientId.trim() || !clientSecret.trim()}
+              onClick={connect}
+            >
+              {busy ? "Waiting…" : "Connect"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {note ? (
+        <p className="small muted" style={{ margin: "8px 0 0" }}>
+          {note}
+        </p>
+      ) : null}
+      {failure ? (
+        <p className="small" style={{ margin: "8px 0 0", color: "var(--danger)" }}>
+          {failure}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

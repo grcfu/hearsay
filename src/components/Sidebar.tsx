@@ -96,6 +96,22 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   }, [recording]);
 
   const [scrubbed, setScrubbed] = useState<string | null>(null);
+  const [meeting, setMeeting] = useState<{ id: string; title: string } | null>(null);
+
+  // The calendar offers; it never starts anything. A recorder that arms itself is one
+  // the user cannot trust to be off.
+  useEffect(() => {
+    const unlisten = listen<{ id: string; title: string }>("calendar-arm", (message) =>
+      setMeeting(message.payload),
+    );
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (recording) setMeeting(null);
+  }, [recording]);
 
   // The scrub hotkey works while Hearsay is in the background, so confirmation has to
   // arrive by event. Silently erasing audio with no acknowledgement would leave the user
@@ -252,6 +268,27 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
             Start recording
           </button>
         )}
+        {meeting && !recording ? (
+          <div className="live-indicator" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
+            <span className="small">“{meeting.title}” is starting.</span>
+            <div className="row">
+              <button
+                type="button"
+                className="button"
+                style={{ flex: 1 }}
+                onClick={() => {
+                  setMeeting(null);
+                  void start();
+                }}
+              >
+                Record it
+              </button>
+              <button type="button" className="button" onClick={() => setMeeting(null)}>
+                Not now
+              </button>
+            </div>
+          </div>
+        ) : null}
         {error ? (
           <p className="small" style={{ margin: "4px 6px 0", opacity: 0.9 }}>
             {error}

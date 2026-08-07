@@ -27,14 +27,19 @@ keyring = { version = "4.1", features = ["apple-native-keyring-store"] }
 reqwest = { version = "0.13", default-features = false, features = [
     "blocking",
     "charset",
+    "form",
     "http2",
     "json",
+    "query",
     "rustls",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tiny_http = "0.12"
 hound = "3.5"
 libc = "0.2"
+sha2 = "0.11"
+base64 = "0.23"
+urlencoding = "2.1"
 cpal = "0.18"
 
 [profile.release]

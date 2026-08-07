@@ -4,6 +4,7 @@
 //! macro generates hidden items alongside each command, and a `pub use` re-export leaves
 //! those behind.
 
+pub mod calendar;
 pub mod events;
 pub mod mute;
 pub mod recording;

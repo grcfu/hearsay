@@ -9,7 +9,13 @@ searchable events. Single user, single machine, no server, no accounts.
 
 These are not preferences. Violating any of them is a bug, even if the app still runs.
 
-- **Nothing leaves the machine** except explicit LLM summary calls made with the user's own API key.
+- **Nothing leaves the machine** except two named, opt-in exceptions, both using the
+  user's own credentials:
+  1. **LLM summary calls**, made only when the user asks for a summary.
+  2. **Google Calendar reads** (§11), when the user connects a calendar — read-only,
+     titles and times only, and nothing is ever uploaded.
+
+  There is no third. Adding one is a spec change, not an implementation detail.
 - **No analytics, no telemetry, no crash reporting, no update checks.** Do not add a dependency that
   phones home. If a crate or npm package does background network I/O, it does not belong here.
 - **One user.** No auth, no roles, no sharing, no multi-tenancy, no "workspace" concept.
@@ -232,7 +238,30 @@ System font stack. Sentence case everywhere. **Two weights only: 400 and 500.** 
 
 ---
 
-## 11. Ground rules
+## 11. Calendar
+
+Optional and off until connected. Google OAuth via an **installed-application loopback**:
+a local HTTP server on a random port receives the redirect, so no credential passes
+through a URL bar. PKCE (S256) throughout.
+
+The user supplies their own OAuth client — Hearsay embeds none, because an embedded
+client would route every user's calendar access through credentials they do not control.
+Client details and tokens live in the **Keychain**, never in SQLite or a file.
+
+- Scope is `calendar.readonly`. Hearsay cannot create, change, or delete anything.
+- Only event titles and times are read. Attendees, descriptions, and attachments are not
+  requested and not stored.
+- A recording is matched to an event by **greatest time overlap**, requiring at least a
+  quarter of the recording's duration — so joining late still matches, and clipping the
+  end of the previous meeting does not.
+- A calendar title replaces the default `Recording, <time>` name only. A title the user
+  typed is never overwritten.
+- When a meeting starts, the menu bar **offers** to record. It never starts on its own.
+  Offered once per meeting, never repeated.
+
+---
+
+## 12. Ground rules
 
 - **Every commit builds.** If one doesn't, fix it before moving on.
 - **The app runs and is usable from commit 16 onward.** No stubbed screens. No `TODO` in a code path
