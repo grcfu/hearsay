@@ -18,6 +18,11 @@ These are not preferences. Violating any of them is a bug, even if the app still
   There is no third. Adding one is a spec change, not an implementation detail.
 - **No analytics, no telemetry, no crash reporting, no update checks.** Do not add a dependency that
   phones home. If a crate or npm package does background network I/O, it does not belong here.
+
+  Hearsay *does* notice when it is older than the checkout, and says so. That is not an
+  update check: the binary carries the commit it was built from and compares it against
+  the local repository. No server is contacted and nothing is fetched. Any version of
+  this that reaches the network is out.
 - **One user.** No auth, no roles, no sharing, no multi-tenancy, no "workspace" concept.
 - **The app works fully without an API key.** Recording, transcription, search, and playback must
   never be gated on the API. Missing key degrades to transcripts only — it never blocks.

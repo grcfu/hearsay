@@ -91,8 +91,13 @@ when you want the change in the real app.
 
 ### Getting someone else's changes
 
-There is no update notification, by design — checking a server on launch is the thing
-this app does not do. To take new changes:
+Hearsay tells you when the app is older than your checkout. It does this **without any
+network request**: the binary records the commit it was built from, and compares that
+against the repository already on this machine. There is no version endpoint and nothing
+is fetched — "no update checks" stays intact because nothing is checked *remotely*.
+
+After a `git pull`, the next launch shows a banner and a notification with the exact
+command to run. To take new changes:
 
 ```sh
 git pull

@@ -1,5 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  isPermissionGranted,
+  requestPermission as requestNotifications,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import type { SystemStatus } from "../types";
 
 interface Props {
@@ -15,8 +20,70 @@ interface Props {
  * gets the most words because its failure mode is a recording that runs happily and
  * captures nothing at all.
  */
+interface UpdateStatus {
+  behind: boolean;
+  commits: number;
+  built: string;
+  available: string;
+  repo: string;
+}
+
 export function SetupBanner({ status, onRecheck }: Props) {
   const [requesting, setRequesting] = useState(false);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const [dismissedUpdate, setDismissedUpdate] = useState(false);
+
+  // Checked once on launch, against the checkout on this machine — no server, no
+  // version endpoint, nothing fetched. See commands/version.rs.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const found = await invoke<UpdateStatus>("update_status");
+        if (!found.behind) return;
+        setUpdate(found);
+        // Notify too: a new build usually matters most right after a `git pull`, when
+        // the window is not the thing being looked at.
+        let allowed = await isPermissionGranted();
+        if (!allowed) allowed = (await requestNotifications()) === "granted";
+        if (allowed) {
+          sendNotification({
+            title: "A newer build of Hearsay is ready",
+            body: `${found.commits} change${found.commits === 1 ? "" : "s"} since this one. Run ./install.sh in ${found.repo} to update.`,
+          });
+        }
+      } catch {
+        // Not in a checkout, or no git. Nothing to say.
+      }
+    })();
+  }, []);
+
+  if (update && !dismissedUpdate) {
+    return (
+      <Banner>
+        <div>
+          <strong>
+            A newer build is available — {update.commits} change
+            {update.commits === 1 ? "" : "s"} since the one you are running.
+          </strong>
+          <div className="small muted" style={{ marginTop: 4 }}>
+            Running <code>{update.built}</code>, checkout is at{" "}
+            <code>{update.available}</code>. To update, run this in a terminal:
+            <div className="mono" style={{ marginTop: 6 }}>
+              cd {update.repo} &amp;&amp; ./install.sh
+            </div>
+            Your recordings are not touched, and the permission carries over.
+          </div>
+        </div>
+        <button
+          type="button"
+          className="button"
+          onClick={() => setDismissedUpdate(true)}
+        >
+          Later
+        </button>
+      </Banner>
+    );
+  }
 
   if (!status) return null;
 

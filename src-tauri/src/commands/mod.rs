@@ -12,4 +12,5 @@ pub mod scrub;
 pub mod settings;
 pub mod summary;
 pub mod system;
+pub mod version;
 pub mod transcription;

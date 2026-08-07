@@ -54,6 +54,7 @@ pub fn run() {
         .manage(AppState::new(db))
         .invoke_handler(tauri::generate_handler![
             commands::system::system_status,
+            commands::version::update_status,
             commands::system::request_audio_permission,
             commands::system::list_audible_apps,
             commands::recording::start_recording,
