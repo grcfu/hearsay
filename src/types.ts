@@ -4,6 +4,9 @@ export type Mode = "listen_only" | "conversation";
 
 export type Channel = "mic" | "system";
 
+/** Which pane three is showing. Not a route — there is no navigation stack. */
+export type View = "recordings" | "settings";
+
 export interface SystemStatus {
   helper_available: boolean;
   helper_path: string | null;

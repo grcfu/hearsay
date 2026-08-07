@@ -23,7 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "6.0"
 rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
-keyring = { version = "4.1", features = ["apple-native"] }
+keyring = { version = "4.1", features = ["apple-native-keyring-store"] }
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls-tls",

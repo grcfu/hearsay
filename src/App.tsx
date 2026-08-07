@@ -4,7 +4,8 @@ import { Sidebar } from "./components/Sidebar";
 import { EventList } from "./components/EventList";
 import { Detail } from "./components/Detail";
 import { SetupBanner } from "./components/SetupBanner";
-import type { Mode, SystemStatus } from "./types";
+import { SettingsPane } from "./components/SettingsPane";
+import type { Mode, SystemStatus, View } from "./types";
 
 /**
  * The whole application: three panes, side by side, always visible.
@@ -17,6 +18,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [seekMs, setSeekMs] = useState<number | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
+  const [view, setView] = useState<View>("recordings");
 
   // listen_only on every launch, deliberately not persisted. Whatever mode was used
   // last time must never silently arm the microphone this time.
@@ -42,8 +44,11 @@ export function App() {
         mode={mode}
         onModeChange={setMode}
         status={status}
+        view={view}
+        onViewChange={setView}
         onRecorded={(eventId) => {
           setSelectedId(eventId);
+          setView("recordings");
           refresh();
         }}
         onStatusChange={loadStatus}
@@ -61,6 +66,10 @@ export function App() {
       />
 
       <div className="detail">
+        {view === "settings" ? (
+          <SettingsPane status={status} onStatusChange={loadStatus} />
+        ) : (
+          <>
         <SetupBanner status={status} onRecheck={loadStatus} />
         <Detail
           eventId={selectedId}
@@ -70,6 +79,8 @@ export function App() {
             void loadStatus();
           }}
         />
+          </>
+        )}
       </div>
     </div>
   );

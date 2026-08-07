@@ -664,3 +664,10 @@ textarea {
   padding: 4px 9px;
   font-size: 12px;
 }
+
+/* A link is sapphire, never gold. Gold means recording. */
+.link {
+  color: var(--sapphire);
+  text-decoration: underline;
+  font: inherit;
+}

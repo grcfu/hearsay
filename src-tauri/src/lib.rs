@@ -51,6 +51,9 @@ pub fn run() {
             commands::events::rename_event,
             commands::events::search_transcripts,
             commands::events::delete_event,
+            commands::settings::settings,
+            commands::settings::save_api_key,
+            commands::settings::clear_api_key,
         ])
         .setup(|app| {
             // Recording is driven from the window; without one there is nothing to drive

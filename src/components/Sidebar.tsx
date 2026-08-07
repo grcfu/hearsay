@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatClock } from "../format";
-import type { AudibleApp, HearsayEvent, Mode, SystemStatus } from "../types";
+import type { AudibleApp, HearsayEvent, Mode, SystemStatus, View } from "../types";
 
 interface LiveStatus {
   recording: boolean;
@@ -20,6 +20,8 @@ interface Props {
   status: SystemStatus | null;
   onRecorded: (eventId: number) => void;
   onStatusChange: () => void;
+  view: View;
+  onViewChange: (view: View) => void;
 }
 
 /**
@@ -29,7 +31,7 @@ interface Props {
  * while a session runs. That is what makes a glance at this pane a reliable answer to
  * "is it recording right now?".
  */
-export function Sidebar({ mode, onModeChange, status, onRecorded }: Props) {
+export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewChange }: Props) {
   const [live, setLive] = useState<LiveStatus | null>(null);
   const [apps, setApps] = useState<AudibleApp[]>([]);
   const [selectedApp, setSelectedApp] = useState<string>("");
@@ -165,6 +167,23 @@ export function Sidebar({ mode, onModeChange, status, onRecorded }: Props) {
             : "Microphone on the left channel, system audio on the right."}
         </p>
       </div>
+
+      <nav className="sidebar-section" aria-label="Views">
+        <button
+          type="button"
+          className={`nav-item${view === "recordings" ? " active" : ""}`}
+          onClick={() => onViewChange("recordings")}
+        >
+          Recordings
+        </button>
+        <button
+          type="button"
+          className={`nav-item${view === "settings" ? " active" : ""}`}
+          onClick={() => onViewChange("settings")}
+        >
+          Settings
+        </button>
+      </nav>
 
       <div className="sidebar-section">
         <div className="sidebar-label">Record from</div>

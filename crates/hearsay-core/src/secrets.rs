@@ -1,0 +1,103 @@
+//! The Anthropic API key.
+//!
+//! Stored in the macOS Keychain and nowhere else. Never in a `.env`, never in SQLite,
+//! never in a log line, never in an error message, and never sent to the frontend — the
+//! UI is only ever told whether a key exists, never what it is.
+//!
+//! Everything in the app works without a key. Recording, transcription, playback and
+//! search never consult this module; only summary generation does.
+
+use anyhow::{Context, Result};
+
+/// Keychain service name. Shows in Keychain Access as the item's "where".
+const SERVICE: &str = "com.hearsay.app";
+/// Account name within the service.
+const ACCOUNT: &str = "anthropic-api-key";
+
+fn entry() -> Result<keyring::Entry> {
+    keyring::Entry::new(SERVICE, ACCOUNT).context("could not reach the macOS Keychain")
+}
+
+/// Stores the key, replacing any existing one.
+///
+/// The key is trimmed, because pasted keys routinely carry a trailing newline and an
+/// invisible character would otherwise become a baffling authentication failure.
+pub fn set_api_key(key: &str) -> Result<()> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("an empty key cannot be saved");
+    }
+    entry()?
+        .set_password(trimmed)
+        // Deliberately vague: an error string must never be able to carry the key.
+        .context("could not save the key to the Keychain")?;
+    Ok(())
+}
+
+/// Reads the key. `None` means no key is stored, which is a normal state, not an error.
+pub fn api_key() -> Result<Option<String>> {
+    match entry()?.get_password() {
+        Ok(key) => Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(anyhow::anyhow!(
+            "could not read the key from the Keychain: {}",
+            // `error` cannot contain the secret; keyring reports the lookup, not the value.
+            error
+        )),
+    }
+}
+
+/// Whether a key is stored. This is all the frontend is ever told.
+pub fn has_api_key() -> bool {
+    matches!(api_key(), Ok(Some(_)))
+}
+
+/// Removes the key. Removing a key that is not there succeeds.
+pub fn clear_api_key() -> Result<()> {
+    match entry()?.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!(
+            "could not remove the key from the Keychain: {error}"
+        )),
+    }
+}
+
+/// A safe fingerprint of a key, for confirming *which* key is stored without revealing
+/// it. Shows only the prefix and the last four characters, the way a bank shows a card.
+pub fn key_hint(key: &str) -> String {
+    let trimmed = key.trim();
+    let characters: Vec<char> = trimmed.chars().collect();
+    if characters.len() <= 12 {
+        return "•".repeat(characters.len().max(4));
+    }
+    let tail: String = characters[characters.len() - 4..].iter().collect();
+    format!("sk-ant-…{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hint_never_reveals_the_middle_of_a_key() {
+        let key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let hint = key_hint(key);
+        assert!(hint.ends_with("6789"), "got {hint}");
+        assert!(
+            !hint.contains("ABCDEFGH"),
+            "the hint leaked part of the key: {hint}"
+        );
+    }
+
+    #[test]
+    fn a_short_value_is_fully_masked() {
+        assert_eq!(key_hint("abcd"), "••••");
+        assert!(!key_hint("shortkey").contains("short"));
+    }
+
+    #[test]
+    fn an_empty_key_is_refused() {
+        assert!(set_api_key("   ").is_err());
+    }
+}

@@ -5,6 +5,7 @@
 
 pub mod db;
 pub mod paths;
+pub mod secrets;
 pub mod transcribe;
 
 pub use db::{Database, Event, MuteSpan, NewSegment, Segment};
