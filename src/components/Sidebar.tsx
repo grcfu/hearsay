@@ -206,9 +206,11 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
       {/* The title bar is transparent (titleBarStyle: Overlay), so the window has no
           chrome of its own to grab. This strip is the drag handle, and it also holds the
           space the traffic lights sit in. */}
-      <div className="drag-strip" data-tauri-drag-region />
-      <div className="sidebar-title" data-tauri-drag-region>
-        Hearsay
+      <div className="sidebar-head">
+        <div className="drag-strip" data-tauri-drag-region />
+        <div className="sidebar-title" data-tauri-drag-region>
+          Hearsay
+        </div>
       </div>
 
       <div className="sidebar-section">
@@ -333,9 +335,6 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
             : "Everything, including music playing alongside."}
         </p>
       </div>
-
-      {/* Pushes the footer to the bottom of the sidebar. */}
-      <div className="spacer" />
 
       <nav className="sidebar-footer" aria-label="Views">
         <button

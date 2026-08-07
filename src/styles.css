@@ -154,14 +154,32 @@ select {
   color: var(--white);
   display: flex;
   flex-direction: column;
-  gap: var(--s4);
+  /*
+   * Spread the sections down the column rather than stacking them at the top. There are
+   * only four of them, and top-aligning left most of the pane empty — the gap is the
+   * minimum, and whatever height is left over is shared between them.
+   */
+  justify-content: space-between;
+  gap: var(--s6);
   padding: 0 var(--s4) var(--s4);
   overflow-y: auto;
 }
 
+/* Sections keep their own height; only the space between them grows. */
+.sidebar > * {
+  flex: none;
+}
+
+/* The wordmark and the drag strip are one unit, so distributing the sections below does
+   not push the app's own name down the column. */
+.sidebar-head {
+  display: flex;
+  flex-direction: column;
+}
+
 .sidebar-title {
   font-family: var(--font-display);
-  font-size: 21px;
+  font-size: 23px;
   font-weight: var(--weight-medium);
   letter-spacing: 0.005em;
   padding: 0 var(--s2);
@@ -171,12 +189,12 @@ select {
 .sidebar-section {
   display: flex;
   flex-direction: column;
-  gap: var(--s2);
+  gap: var(--s3);
 }
 
 /* Micro-labels read as an index rather than a form: small, letterspaced, quiet. */
 .sidebar-label {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: var(--weight-medium);
   letter-spacing: 0.11em;
   text-transform: uppercase;
@@ -219,10 +237,10 @@ select {
   justify-content: center;
   gap: var(--s2);
   width: 100%;
-  padding: var(--s3) var(--s4);
+  padding: var(--s5) var(--s4);
   border-radius: var(--radius);
   font-weight: var(--weight-medium);
-  font-size: 15.5px;
+  font-size: 17px;
   letter-spacing: 0.005em;
   background: var(--quicksand);
   color: var(--royal);
@@ -276,7 +294,7 @@ select {
   display: flex;
   align-items: center;
   gap: var(--s2);
-  padding: var(--s2) var(--s3);
+  padding: var(--s3);
   border-radius: var(--radius-sm);
   background: rgb(255 255 255 / 8%);
 }
@@ -300,9 +318,9 @@ select {
 
 .mode-option {
   flex: 1;
-  padding: var(--s2) var(--s2);
-  border-radius: 3px;
-  font-size: 13px;
+  padding: var(--s3) var(--s2);
+  border-radius: 4px;
+  font-size: 14px;
   color: var(--white);
   opacity: 0.68;
   text-align: center;
@@ -641,12 +659,12 @@ select {
 
 .app-select {
   width: 100%;
-  padding: var(--s2) var(--s3);
+  padding: var(--s3);
   border-radius: var(--radius-sm);
   border: 1px solid rgb(255 255 255 / 18%);
   background: rgb(255 255 255 / 8%);
   color: var(--white);
-  font-size: 13.5px;
+  font-size: 14.5px;
 }
 
 .app-select:disabled {
@@ -791,6 +809,7 @@ select {
 
 .mute-button {
   width: 100%;
+  padding: var(--s3) var(--s4);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -943,8 +962,8 @@ kbd {
 .icon-nav {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   border-radius: var(--radius-sm);
   color: var(--white);
   opacity: 0.55;
