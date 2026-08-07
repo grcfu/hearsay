@@ -1,0 +1,18 @@
+# Transcription sidecar dependencies.
+#
+# Pinned exactly. An unpinned transcription stack means the same recording can
+# transcribe differently after an unrelated `pip install`, and there is no server to
+# roll back to.
+#
+# Everything here runs locally. The one time any of it touches the network is the
+# initial model download from Hugging Face, which the app asks for explicitly and shows
+# progress for. Weights land in ~/Library/Application Support/hearsay/models/ and are
+# reused from then on; transcription itself never needs a connection.
+
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+
+# Reads the recorded WAV. Chosen over librosa/scipy because it is one small wheel with
+# no build step and no scientific-stack dependency tree.
+soundfile==0.13.1
+numpy==2.3.4
