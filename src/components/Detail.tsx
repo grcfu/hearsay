@@ -343,6 +343,7 @@ function SummaryTab({
 }) {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // The summary runs on a worker thread and reports back by event, so this listens
   // rather than awaiting the invoke.
@@ -390,6 +391,25 @@ function SummaryTab({
         <>
           <div className="summary">{renderMarkdown(event.summary_md)}</div>
           <div className="row" style={{ marginTop: 24 }}>
+            <button
+              type="button"
+              className="button"
+              onClick={async () => {
+                // Deliberately a copy rather than a write to the calendar. A calendar
+                // description is visible to every guest on the invite, and a summary of
+                // a meeting is not always something the other attendees should read.
+                // Copying leaves that judgement with the person who was there.
+                try {
+                  await navigator.clipboard.writeText(event.summary_md ?? "");
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 2500);
+                } catch {
+                  setError("Could not copy — select the text and copy it manually.");
+                }
+              }}
+            >
+              {copied ? "Copied" : "Copy summary"}
+            </button>
             <button type="button" className="button" onClick={generate} disabled={running}>
               {running ? "Regenerating…" : "Regenerate"}
             </button>

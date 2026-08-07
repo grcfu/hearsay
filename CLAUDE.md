@@ -288,6 +288,14 @@ Client details and tokens live in the **Keychain**, never in SQLite or a file.
 - When a meeting starts, the menu bar **offers** to record. It never starts on its own.
   Offered once per meeting, never repeated.
 
+**Summaries are never written back to the calendar.** This was considered and rejected: a
+calendar event's description is visible to every guest on the invite, and Google offers
+no per-person private field. Writing a summary there would push notes about a 1:1, an
+interview, or a vendor call to everyone present, irreversibly. The detail pane has a
+**Copy summary** button instead, which leaves the judgement of who should read it with
+the person who was in the room. Adding write access would also mean upgrading the OAuth
+scope beyond `calendar.readonly`, which §1 rules out.
+
 ---
 
 ## 12. Ground rules
