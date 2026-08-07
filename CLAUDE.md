@@ -226,11 +226,15 @@ glance becomes a guess.
 
 ### Layout
 
-Three panes. No nesting, no back button.
+A control bar across the top, then two panes. No nesting, no back button.
 
-1. **Sidebar** (royal) — record button, mode toggle, nav
+1. **Top bar** (royal) — record button, mode toggle, source picker, nav icons. Doubles as
+   the window's drag region, since the title bar is transparent.
 2. **Event list** (swan canvas) — grouped by day, cards on white
 3. **Detail** (white) — title, date, peer tabs *Summary / Transcript / Audio*
+
+The controls were a left column originally. Four short controls in a full-height strip
+left most of it empty, and took width away from the two panes that hold the content.
 
 ### Typography
 

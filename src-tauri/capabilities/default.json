@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capabilities for the single Hearsay window. Deliberately narrow: no HTTP client, no shell access, no filesystem write permissions handed to the frontend.",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -10,6 +12,7 @@
     "dialog:allow-ask",
     "dialog:allow-message",
     "global-shortcut:default",
-    "opener:allow-open-url"
+    "opener:allow-open-url",
+    "notification:default"
   ]
 }

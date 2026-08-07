@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { formatClock } from "../format";
 import type { AudibleApp, HearsayEvent, Mode, SystemStatus, View } from "../types";
 
@@ -97,6 +102,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
 
   const [scrubbed, setScrubbed] = useState<string | null>(null);
   const [meeting, setMeeting] = useState<{ id: string; title: string } | null>(null);
+  const [dismissedSilence, setDismissedSilence] = useState(false);
 
   // The calendar offers; it never starts anything. A recorder that arms itself is one
   // the user cannot trust to be off.
@@ -111,7 +117,34 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
 
   useEffect(() => {
     if (recording) setMeeting(null);
+    else setDismissedSilence(false);
   }, [recording]);
+
+  // A minute of recording with no audio at all. Not proof — a genuinely quiet room looks
+  // the same — but worth interrupting for, because the alternative is discovering it
+  // after the meeting. Dismissible, and never stops the recording on its own.
+  const silentTooLong =
+    recording && !dismissedSilence && (live?.elapsed_ms ?? 0) > 60_000 && !live?.has_audio;
+
+  // The window is usually behind the meeting app, so an in-window banner would go
+  // unseen. Ask the system to surface it.
+  useEffect(() => {
+    if (!silentTooLong) return;
+    void (async () => {
+      try {
+        let allowed = await isPermissionGranted();
+        if (!allowed) allowed = (await requestPermission()) === "granted";
+        if (allowed) {
+          sendNotification({
+            title: "Hearsay has not heard anything",
+            body: "A minute into this recording, no audio has been captured. Open Hearsay to stop it, or ignore this if the room is just quiet.",
+          });
+        }
+      } catch {
+        // No notification permission is survivable — the in-window alert still shows.
+      }
+    })();
+  }, [silentTooLong]);
 
   // The scrub hotkey works while Hearsay is in the background, so confirmation has to
   // arrive by event. Silently erasing audio with no acknowledgement would leave the user
@@ -201,19 +234,16 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
 
   const blocked = !status?.helper_available || !status?.audio_permission;
 
+
+  // The title bar is transparent, so this bar doubles as the window's drag handle and
+  // holds the space the traffic lights sit in.
   return (
-    <aside className="sidebar">
-      {/* The title bar is transparent (titleBarStyle: Overlay), so the window has no
-          chrome of its own to grab. This strip is the drag handle, and it also holds the
-          space the traffic lights sit in. */}
-      <div className="sidebar-head">
-        <div className="drag-strip" data-tauri-drag-region />
-        <div className="sidebar-title" data-tauri-drag-region>
-          Hearsay
-        </div>
+    <header className="topbar" data-tauri-drag-region>
+      <div className="brand" data-tauri-drag-region>
+        Hearsay
       </div>
 
-      <div className="sidebar-section">
+      <div className="bar-group">
         {recording ? (
           <>
             <button type="button" className="record-button stop" onClick={stop} disabled={busy}>
@@ -251,6 +281,21 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
                 Your microphone is writing silence. The other side is still being
                 recorded, and the muted stretch is marked in the transcript.
               </p>
+            ) : null}
+            {silentTooLong ? (
+              <div className="bar-alert">
+                <span>Nothing heard for a minute.</span>
+                <button type="button" className="button small" onClick={stop}>
+                  End recording
+                </button>
+                <button
+                  type="button"
+                  className="button small"
+                  onClick={() => setDismissedSilence(true)}
+                >
+                  Keep going
+                </button>
+              </div>
             ) : null}
             {live?.echo ? (
               <p className="small" style={{ opacity: 0.85, margin: "2px 6px 0" }}>
@@ -304,18 +349,11 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
         ) : null}
       </div>
 
-      <div className="sidebar-section">
-        <div className="sidebar-label">Mode</div>
+      <div className="bar-group">
         <ModeToggle mode={mode} onChange={onModeChange} disabled={recording} />
-        <p className="small" style={{ opacity: 0.6, padding: "2px 6px 0", margin: 0 }}>
-          {mode === "listen_only"
-            ? "System audio only. The microphone is never opened."
-            : "Microphone on the left channel, system audio on the right."}
-        </p>
       </div>
 
-      <div className="sidebar-section">
-        <div className="sidebar-label">Record from</div>
+      <div className="bar-group">
         <select
           className="app-select"
           value={selectedApp}
@@ -329,14 +367,19 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
             </option>
           ))}
         </select>
-        <p className="small" style={{ opacity: 0.6, padding: "2px 6px 0", margin: 0 }}>
-          {selectedApp
-            ? "Only this app. Music playing alongside stays out."
-            : "Everything, including music playing alongside."}
-        </p>
       </div>
 
-      <nav className="sidebar-footer" aria-label="Views">
+      {/* The mode and source descriptions used to sit under each control. In a bar there
+          is no room, and they said the same thing every time — one line that reflects the
+          current choice carries the same information in a fraction of the space. */}
+      <p className="bar-hint">
+        {mode === "listen_only"
+          ? "System audio only — the microphone is never opened."
+          : "Microphone on the left, system audio on the right."}
+        {selectedApp ? " Only the chosen app." : " Everything the machine plays."}
+      </p>
+
+      <nav className="topbar-nav" aria-label="Views">
         <button
           type="button"
           className={`icon-nav${view === "recordings" ? " active" : ""}`}
@@ -356,7 +399,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
           <SettingsIcon />
         </button>
       </nav>
-    </aside>
+    </header>
   );
 }
 

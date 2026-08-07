@@ -140,11 +140,93 @@ select {
 
 /* ---------- Three panes. No nesting, no back button. ---------- */
 
+/*
+ * A bar across the top, then the two panes that hold content.
+ *
+ * The controls were a left column, which meant a full-height royal strip holding four
+ * short controls and a great deal of nothing. Laid out horizontally they occupy one
+ * line, and the recordings and the transcript get the whole window beneath.
+ */
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-width) var(--list-width) 1fr;
+  grid-template-rows: auto 1fr;
   height: 100%;
   overflow: hidden;
+}
+
+.panes {
+  display: grid;
+  grid-template-columns: var(--list-width) 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+  background: var(--royal);
+  color: var(--white);
+  /* Left padding clears the traffic lights, which sit over a transparent title bar. */
+  padding: 0 var(--s5) 0 84px;
+  height: 56px;
+  flex: none;
+  /* Nothing in the bar may push the controls past the right edge. */
+  min-width: 0;
+  overflow: hidden;
+}
+
+.brand {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.005em;
+  flex: none;
+}
+
+.bar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex: none;
+}
+
+/* One line that reflects the current choice, rather than a caption under every control. */
+.bar-hint {
+  font-size: 12.5px;
+  opacity: 0.55;
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  flex: none;
+  margin-left: var(--s3);
+}
+
+/* The silent-recording alert. Sits in the bar so it is visible the moment the window is. */
+.bar-alert {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--quicksand);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.bar-alert .button {
+  background: transparent;
+  color: var(--white);
+  border-color: rgb(255 255 255 / 35%);
 }
 
 /* ---------- Pane 1: sidebar ---------- */
@@ -236,11 +318,11 @@ select {
   align-items: center;
   justify-content: center;
   gap: var(--s2);
-  width: 100%;
-  padding: var(--s5) var(--s4);
+  padding: var(--s3) var(--s5);
   border-radius: var(--radius);
   font-weight: var(--weight-medium);
-  font-size: 17px;
+  font-size: 15px;
+  flex: none;
   letter-spacing: 0.005em;
   background: var(--quicksand);
   color: var(--royal);
@@ -294,7 +376,7 @@ select {
   display: flex;
   align-items: center;
   gap: var(--s2);
-  padding: var(--s3);
+  padding: var(--s2) var(--s3);
   border-radius: var(--radius-sm);
   background: rgb(255 255 255 / 8%);
 }
@@ -372,7 +454,6 @@ select {
   top: 0;
   background: var(--swan);
   padding: var(--s3) var(--s4);
-  padding-top: var(--titlebar);
   border-bottom: var(--hairline);
   z-index: 1;
 }
@@ -432,7 +513,7 @@ select {
 
 .event-card-title {
   font-family: var(--font-display);
-  font-size: 16.5px;
+  font-size: 17px;
   font-weight: var(--weight-medium);
   letter-spacing: -0.003em;
   display: block;
@@ -461,8 +542,7 @@ select {
 }
 
 .detail-header {
-  padding: var(--titlebar) var(--s6) 0;
-  -webkit-app-region: drag;
+  padding: var(--s4) var(--s6) 0;
   border-bottom: var(--hairline);
   background: var(--white);
   position: sticky;
@@ -537,6 +617,7 @@ select {
 /* ---------- Shared pieces ---------- */
 
 .empty {
+  font-size: 14.5px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -551,7 +632,7 @@ select {
 /* The first line of an empty state is a statement, so it is set like one. */
 .empty > div:first-child {
   font-family: var(--font-display);
-  font-size: 20px;
+  font-size: 24px;
   color: var(--royal);
 }
 
@@ -658,8 +739,8 @@ select {
 /* ---------- Source picker and level meter ---------- */
 
 .app-select {
-  width: 100%;
-  padding: var(--s3);
+  max-width: 230px;
+  padding: var(--s2) var(--s3);
   border-radius: var(--radius-sm);
   border: 1px solid rgb(255 255 255 / 18%);
   background: rgb(255 255 255 / 8%);
@@ -748,7 +829,7 @@ select {
 
 /* The words themselves get the most room and the calmest setting. */
 .transcript-text {
-  font-size: 16px;
+  font-size: 16.5px;
   line-height: 1.58;
 }
 
@@ -771,7 +852,7 @@ select {
 
 .summary {
   max-width: var(--measure);
-  font-size: 16px;
+  font-size: 16.5px;
   line-height: 1.62;
 }
 
@@ -808,8 +889,7 @@ select {
 /* ---------- Mute ---------- */
 
 .mute-button {
-  width: 100%;
-  padding: var(--s3) var(--s4);
+  padding: var(--s2) var(--s3);
   display: flex;
   align-items: center;
   justify-content: center;

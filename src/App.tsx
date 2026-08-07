@@ -54,6 +54,7 @@ export function App() {
         onStatusChange={loadStatus}
       />
 
+      <main className="panes">
       <EventList
         selectedId={selectedId}
         onSelect={(id, at) => {
@@ -82,6 +83,7 @@ export function App() {
           </>
         )}
       </div>
+      </main>
     </div>
   );
 }
