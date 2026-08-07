@@ -190,6 +190,9 @@ select {
   font-weight: var(--weight-medium);
   letter-spacing: 0.005em;
   flex: none;
+  /* Slightly wider than the gaps between controls: a title introduces the row rather
+     than being one more item in it. */
+  margin-right: calc(var(--s2) * var(--bar-scale, 1));
 }
 
 .bar-group {
@@ -199,11 +202,17 @@ select {
   flex: none;
 }
 
-/* A group whose caption sits beneath its control. */
+/*
+ * A group whose caption sits beneath its control.
+ *
+ * The caption is taken out of the flow rather than stacked in it. With it in the flow,
+ * a captioned group was taller than an uncaptioned one, and `align-items: center`
+ * centred each group's *combined* height — so the mode toggle sat above the bar's
+ * midline while the record button sat on it, and the row read as crooked. Positioned
+ * below, every control centres on the same line and the captions hang beneath.
+ */
 .bar-group.stack {
-  flex-direction: column;
-  align-items: stretch;
-  gap: calc(var(--s2) * var(--bar-scale, 1));
+  position: relative;
 }
 
 /*
@@ -212,12 +221,19 @@ select {
  * where it was always the thing that got truncated.
  */
 .bar-caption {
-  margin: 0;
-  font-size: calc(10.5px * var(--bar-scale, 1));
-  line-height: 1.35;
-  opacity: 0.5;
-  max-width: 30ch;
-  white-space: normal;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: calc(var(--s2) * var(--bar-scale, 1)) 0 0;
+  font-size: calc(11px * var(--bar-scale, 1));
+  line-height: 1.3;
+  opacity: 0.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Centred under its control, so the caption reads as belonging to it. */
+  text-align: center;
 }
 
 .bar-hint {
@@ -463,10 +479,34 @@ select {
 
 .mode-toggle {
   display: flex;
+  align-items: stretch;
   background: rgb(255 255 255 / 8%);
   border-radius: var(--radius-sm);
   padding: 2px;
   gap: 2px;
+}
+
+/* One height for every control in the bar, so the row has a single top and bottom edge
+   instead of three slightly different ones. */
+.topbar .mode-toggle,
+.topbar .app-select,
+.topbar .record-button,
+.topbar .live-indicator {
+  height: calc(40px * var(--bar-scale, 1));
+}
+
+.topbar .record-button,
+.topbar .app-select {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.topbar .mode-option {
+  padding-top: 0;
+  padding-bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .mode-option {
@@ -1200,6 +1240,16 @@ kbd {
   }
 }
 
+
+/*
+ * Captions are positioned below their controls, so centring the row ignores them and
+ * the whole block ends up sitting high with a band of empty space beneath. Reserving
+ * the caption's height as bottom padding pulls the centre back up, and the row reads as
+ * optically centred rather than merely mathematically so.
+ */
+.topbar.with-captions {
+  padding-bottom: calc(24px * var(--bar-scale, 1));
+}
 
 /* ---------- Resizing the bar ---------- */
 

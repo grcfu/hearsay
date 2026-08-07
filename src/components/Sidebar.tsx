@@ -286,7 +286,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   // holds the space the traffic lights sit in.
   return (
     <header
-      className="topbar"
+      className={`topbar${showCaptions ? " with-captions" : ""}`}
       data-tauri-drag-region
       style={
         {
