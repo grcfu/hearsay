@@ -76,6 +76,23 @@ first time you use conversation mode.
 Permissions are tied to code identity, so the installed app needs its own grant even if
 you already granted one to your terminal while building.
 
+### Reinstalling after a change
+
+```sh
+./install.sh              # rebuild and replace /Applications/Hearsay.app
+./install.sh --reset-tcc  # ...and clear the stored permission so macOS asks again
+```
+
+There is no auto-updater on purpose — an updater checks a server on every launch, and
+"no update checks" is one of this project's non-negotiables. This script does the same
+job from the source already on your disk.
+
+**If the permission banner appears after a rebuild**, use `--reset-tcc`. The app is
+ad-hoc signed, and macOS binds permission grants to a signature hash that changes on
+every build — so the System Settings toggle can look switched on while pointing at a
+build that no longer exists. A paid Apple Developer certificate is the only permanent
+fix; until then, resetting re-binds the grant to the current build.
+
 ### Keep the checkout
 
 **Do not delete the cloned repo after building.** The app finds the Python transcription

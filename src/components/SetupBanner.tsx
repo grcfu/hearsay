@@ -55,11 +55,14 @@ export function SetupBanner({ status, onRecheck }: Props) {
     return (
       <Banner problem>
         <div>
-          <strong>macOS has not granted permission to record system audio.</strong> Until
-          it does, a recording will run normally and capture nothing but silence.
+          <strong>macOS reports that system audio recording is not permitted.</strong>{" "}
+          You can still record — if it captures only silence, this is why.
           <div className="small muted" style={{ marginTop: 4 }}>
-            Grant it in System Settings → Privacy &amp; Security → Screen &amp; System
-            Audio Recording, then quit and reopen Hearsay.
+            Press Ask macOS. If no prompt appears, the permission is switched on for an
+            older build: macOS ties it to a signature that changes every time the app is
+            rebuilt. Run <code>./install.sh --reset-tcc</code> from the repo to clear it,
+            or remove Hearsay from System Settings → Privacy &amp; Security → Screen
+            &amp; System Audio Recording and add it back with +.
           </div>
         </div>
         <button
