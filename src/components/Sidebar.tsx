@@ -12,8 +12,8 @@ import type { AudibleApp, HearsayEvent, Mode, SystemStatus, View } from "../type
 /** Bar height limits. Below the minimum the controls collide; above the maximum the bar
  *  starts eating the recordings list for no benefit. */
 const BAR_MIN = 64;
-const BAR_MAX = 132;
-const BAR_DEFAULT = 76;
+const BAR_MAX = 160;
+const BAR_DEFAULT = 132;
 
 interface LiveStatus {
   recording: boolean;
@@ -142,10 +142,10 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     window.addEventListener("pointerup", onUp);
   };
 
-  // Type and spacing scale with the bar so a taller bar reads as roomier rather than
-  // as the same controls with more emptiness around them. Capped well below the height
-  // ratio — text that grew as fast as the bar would look absurd at full extension.
-  const scale = 1 + ((barHeight - BAR_DEFAULT) / (BAR_MAX - BAR_DEFAULT)) * 0.35;
+  // Type and spacing scale with the bar, measured from a fixed reference so shrinking
+  // it shrinks the type as well. Well below the height ratio and clamped at both ends —
+  // text that grew as fast as the bar would look absurd at full extension.
+  const scale = Math.min(1.3, Math.max(0.88, 1 + (barHeight - 96) / 200));
 
   // The calendar offers; it never starts anything. A recorder that arms itself is one
   // the user cannot trust to be off.
@@ -402,11 +402,16 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
         ) : null}
       </div>
 
-      <div className="bar-group">
+      <div className="bar-group stack">
         <ModeToggle mode={mode} onChange={onModeChange} disabled={recording} />
+        <p className="bar-caption">
+          {mode === "listen_only"
+            ? "System audio only — the microphone is never opened."
+            : "Microphone on the left, system audio on the right."}
+        </p>
       </div>
 
-      <div className="bar-group">
+      <div className="bar-group stack">
         <select
           className="app-select"
           value={selectedApp}
@@ -420,17 +425,14 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
             </option>
           ))}
         </select>
+        <p className="bar-caption">
+          {selectedApp
+            ? "Only this app — music alongside stays out."
+            : "Everything the machine plays, music included."}
+        </p>
       </div>
 
-      {/* The mode and source descriptions used to sit under each control. In a bar there
-          is no room, and they said the same thing every time — one line that reflects the
-          current choice carries the same information in a fraction of the space. */}
-      <p className="bar-hint">
-        {mode === "listen_only"
-          ? "System audio only — the microphone is never opened."
-          : "Microphone on the left, system audio on the right."}
-        {selectedApp ? " Only the chosen app." : " Everything the machine plays."}
-      </p>
+      <span className="spacer" />
 
       <nav className="topbar-nav" aria-label="Views">
         <button
