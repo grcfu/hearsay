@@ -298,6 +298,28 @@ replayed as history on every later question, sending the model a turn it never a
 
 ---
 
+## 8c. Saving the audio
+
+The Audio tab has **Save a copy**, which writes the recording to a path the user chose in
+a save sheet. Local only — this is a file copy, not a share, and no network is involved.
+
+- The extension decides the format: **`.m4a`** (AAC at 96 kbps, roughly 43 MB an hour,
+  the default the sheet prefills) or **`.wav`** (the original bytes, copied verbatim).
+- The AAC pass is `/usr/bin/afconvert`, which ships with macOS. **Do not bundle an
+  encoder** and do not depend on a Homebrew `ffmpeg` or `lame` being present.
+- **`.mp3` is refused with an explanation**, not silently satisfied. macOS decodes MP3 and
+  cannot encode it, and writing AAC under an `.mp3` extension would be a file that lies
+  about itself.
+- **The channel split survives the copy.** §4's "never mix to mono" holds here too: a
+  `conversation` export stays stereo, so the exported file keeps its speaker attribution.
+- A recording that is still running cannot be exported — its header understates its length
+  until the next sync, so the copy would be short by an unpredictable amount with nothing
+  to mark what was missing.
+- Hearsay never picks the destination itself. There is no "Exports" folder, no default
+  drop into `~/Downloads`; the audio leaves the app only where the user pointed it.
+
+---
+
 ## 9. Secrets
 
 Summary API keys live in the **macOS Keychain** via the `keyring` crate. Either

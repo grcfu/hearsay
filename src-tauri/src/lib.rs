@@ -71,6 +71,8 @@ pub fn run() {
             commands::events::rename_event,
             commands::events::search_transcripts,
             commands::events::delete_event,
+            commands::export::export_file_name,
+            commands::export::export_audio,
             commands::settings::settings,
             commands::settings::save_api_key,
             commands::settings::set_speaker_name,

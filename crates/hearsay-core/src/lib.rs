@@ -7,6 +7,7 @@ pub mod calendar;
 pub mod chat;
 pub mod db;
 pub mod dedupe;
+pub mod export;
 pub mod paths;
 pub mod secrets;
 pub mod summary;

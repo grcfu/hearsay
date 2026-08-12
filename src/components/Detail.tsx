@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask, save } from "@tauri-apps/plugin-dialog";
 import { Transcript } from "./Transcript";
 import { AskTab } from "./AskTab";
 import { formatDuration, formatMode, formatTime } from "../format";
-import type { HearsayEvent, MuteSpan, Segment, Settings } from "../types";
+import type {
+  ExportedAudio,
+  HearsayEvent,
+  MuteSpan,
+  Segment,
+  Settings,
+} from "../types";
 
 interface EventDetail {
   event: HearsayEvent;
@@ -250,7 +256,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
             src={audioSrc}
             audioRef={audioRef}
             onTime={setPlayheadMs}
-            eventId={event.id}
+            event={event}
           />
         )}
 
@@ -487,18 +493,50 @@ function AudioTab({
   src,
   audioRef,
   onTime,
-  eventId,
+  event,
 }: {
   src: string | null;
   audioRef: React.MutableRefObject<HTMLAudioElement | null>;
   onTime: (ms: number) => void;
-  eventId: number;
+  event: HearsayEvent;
 }) {
   const [retranscribing, setRetranscribing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<ExportedAudio | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
 
   if (!src) {
     return <p className="muted">This recording has no audio file.</p>;
   }
+
+  // The save sheet is the only place this can go: Hearsay picks no folder of its own, so
+  // the copy lands wherever the user says and nowhere else.
+  const saveCopy = async () => {
+    setProblem(null);
+    setSaved(null);
+    try {
+      const fileName = await invoke<string>("export_file_name", { eventId: event.id });
+      const destination = await save({
+        defaultPath: fileName,
+        title: "Save a copy of the audio",
+        filters: [
+          { name: "Compressed audio", extensions: ["m4a"] },
+          { name: "Original recording", extensions: ["wav"] },
+        ],
+      });
+      if (!destination) return;
+
+      setSaving(true);
+      setSaved(await invoke<ExportedAudio>("export_audio", {
+        eventId: event.id,
+        destination,
+      }));
+    } catch (failure) {
+      setProblem(String((failure as { message?: string })?.message ?? failure));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div>
@@ -510,6 +548,32 @@ function AudioTab({
         style={{ width: "100%" }}
         onTimeUpdate={(changed) => onTime(changed.currentTarget.currentTime * 1000)}
       />
+
+      <div className="row" style={{ marginTop: 14 }}>
+        <button type="button" className="button" disabled={saving} onClick={saveCopy}>
+          {saving ? "Saving…" : "Save a copy"}
+        </button>
+        <span className="small muted">
+          Writes an .m4a small enough to keep or send — or a .wav if you name one, which is
+          the recording untouched.
+          {event.mode === "conversation"
+            ? " Either way the channels stay as recorded: you on the left, everyone else on the right."
+            : ""}
+        </span>
+      </div>
+
+      {saved ? (
+        <p className="small muted" style={{ marginTop: 8 }}>
+          Saved {formatBytes(saved.bytes)} to <span className="mono">{saved.path}</span>
+        </p>
+      ) : null}
+
+      {problem ? (
+        <div className="banner problem" style={{ marginTop: 10 }}>
+          {problem}
+        </div>
+      ) : null}
+
       <div className="row" style={{ marginTop: 14 }}>
         <button
           type="button"
@@ -518,7 +582,7 @@ function AudioTab({
           onClick={async () => {
             setRetranscribing(true);
             try {
-              await invoke("retranscribe", { eventId });
+              await invoke("retranscribe", { eventId: event.id });
             } finally {
               setRetranscribing(false);
             }
@@ -532,6 +596,13 @@ function AudioTab({
       </div>
     </div>
   );
+}
+
+/** File size in the units a Finder window would use. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
+  const mb = bytes / 1_000_000;
+  return mb < 1 ? `${Math.round(bytes / 1000)} KB` : `${mb.toFixed(1)} MB`;
 }
 
 /**

@@ -31,6 +31,8 @@ Recordings, transcripts, and audio never go anywhere.
   reaches disk — for the side conversation you only realised was sensitive after it
   started. Both hotkeys work while Hearsay is in the background.
 - **Search everything** with full-text search and click-to-seek.
+- **Save a copy of the audio** from the Audio tab — a small `.m4a` to keep or send, or the
+  original `.wav`. Converted on your machine with the encoder macOS already has.
 - **Optional AI summaries and calendar matching.** Without them, everything else works.
 
 ### Summaries

@@ -7,6 +7,7 @@
 pub mod calendar;
 pub mod chat;
 pub mod events;
+pub mod export;
 pub mod mute;
 pub mod recording;
 pub mod scrub;

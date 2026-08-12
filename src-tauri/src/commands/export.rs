@@ -1,0 +1,78 @@
+//! Saving a copy of a recording's audio outside Hearsay.
+
+use crate::state::{AppState, CommandError, CommandResult};
+use hearsay_core::export::{export_audio as write_export, suggested_file_name, ExportFormat};
+use serde::Serialize;
+use std::path::PathBuf;
+use tauri::State;
+
+/// Where a copy ended up, and how big it turned out.
+#[derive(Debug, Serialize)]
+pub struct ExportedAudio {
+    pub path: String,
+    pub bytes: u64,
+}
+
+/// The name to prefill in the save sheet, from the recording's title and date.
+///
+/// Built here rather than in the webview because it has to survive a filesystem: the title
+/// is free text the user typed, and a slash in it would otherwise read as a directory.
+#[tauri::command]
+pub fn export_file_name(state: State<'_, AppState>, event_id: i64) -> CommandResult<String> {
+    let event = state.db.event(event_id)?.ok_or_else(|| CommandError {
+        message: format!("no recording with id {event_id}"),
+    })?;
+
+    // `started_at` is RFC 3339, so the date is its first ten characters.
+    let date = event
+        .started_at
+        .to_rfc3339()
+        .chars()
+        .take(10)
+        .collect::<String>();
+
+    Ok(suggested_file_name(event.display_title(), &date, ExportFormat::M4a))
+}
+
+/// Writes a copy of the recording's audio to `destination`.
+///
+/// The format comes from the extension the user typed, so one save sheet covers both the
+/// small copy and the original. Runs on Tauri's worker pool — a long meeting takes a few
+/// seconds to convert, and the window stays live throughout.
+#[tauri::command]
+pub fn export_audio(
+    state: State<'_, AppState>,
+    event_id: i64,
+    destination: String,
+) -> CommandResult<ExportedAudio> {
+    // A live recording's file is still being written, and its header understates its
+    // length until the next sync. A copy taken now would be short by an unpredictable
+    // amount, with nothing to show which part is missing.
+    if let Some(active) = state.lock_recording()?.as_ref() {
+        if active.event_id == event_id {
+            return Err(CommandError {
+                message: "this recording is still running — stop it first, then save a copy"
+                    .to_string(),
+            });
+        }
+    }
+
+    let event = state.db.event(event_id)?.ok_or_else(|| CommandError {
+        message: format!("no recording with id {event_id}"),
+    })?;
+
+    let source = event
+        .audio_path
+        .map(PathBuf::from)
+        .ok_or_else(|| CommandError {
+            message: "this recording has no audio file".to_string(),
+        })?;
+
+    let destination = PathBuf::from(destination);
+    let bytes = write_export(&source, &destination)?;
+
+    Ok(ExportedAudio {
+        path: destination.to_string_lossy().to_string(),
+        bytes,
+    })
+}

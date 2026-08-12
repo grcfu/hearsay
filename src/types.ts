@@ -74,6 +74,12 @@ export interface MuteSpan {
   end_ms: number;
 }
 
+/** Where a saved copy landed, and how big it turned out. */
+export interface ExportedAudio {
+  path: string;
+  bytes: number;
+}
+
 export interface SearchHit {
   segment_id: number;
   event_id: number;
