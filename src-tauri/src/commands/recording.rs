@@ -169,6 +169,24 @@ pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> CommandResu
         );
     }
 
+    // Audio the mixer had to drop is the one loss with nothing to show for it: no marker
+    // in the transcript, no gap in the timeline, just missing speech. Report it for the
+    // same reason a muted span is written down — a silent omission is the bug.
+    let dropped_ms = outcome.dropped_ms();
+    if dropped_ms > 0 {
+        tracing::warn!(
+            "recording {event_id} dropped {dropped_ms} ms of captured audio; \
+             the writer could not keep up"
+        );
+        let _ = app.emit(
+            "recording-dropped-audio",
+            serde_json::json!({
+                "event_id": event_id,
+                "dropped_ms": dropped_ms,
+            }),
+        );
+    }
+
     let event = state.db.event(event_id)?.ok_or_else(|| CommandError {
         message: "the recording finished but could not be read back".to_string(),
     })?;

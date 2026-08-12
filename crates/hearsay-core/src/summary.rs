@@ -19,19 +19,19 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const API_VERSION: &str = "2023-06-01";
+pub(crate) const API_URL: &str = "https://api.anthropic.com/v1/messages";
+pub(crate) const API_VERSION: &str = "2023-06-01";
 
 /// Server-side fallback: if a safety classifier declines the request, the API retries it
 /// on another model within the same call rather than handing back a refusal. A meeting
 /// transcript can mention almost anything, so a false positive should not cost the user
 /// their summary.
-const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+pub(crate) const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 
 /// The model used for summaries when Anthropic is the provider.
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 
-const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+pub(crate) const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 /// Gemini model used for summaries.
 ///
 /// An alias rather than a version number, deliberately. `gemini-2.5-flash` was pinned
@@ -463,7 +463,7 @@ of bullets, not a report.";
 pub const DEFAULT_SPEAKER: &str = "You";
 
 /// Resolves the name to address the recorder by, falling back to [`DEFAULT_SPEAKER`].
-fn speaker_or_default(speaker: Option<&str>) -> &str {
+pub(crate) fn speaker_or_default(speaker: Option<&str>) -> &str {
     match speaker {
         Some(name) if !name.trim().is_empty() => name.trim(),
         _ => DEFAULT_SPEAKER,
@@ -487,7 +487,7 @@ fn user_prompt(transcript: &str, speaker: &str) -> String {
 ///
 /// Timestamps are included so the summary can be traced back to the recording, and mute
 /// spans are marked in place so a gap in the conversation is never mistaken for silence.
-fn render_transcript(
+pub fn render_transcript(
     segments: &[Segment],
     mute_spans: &[(i64, i64)],
     speaker: Option<&str>,

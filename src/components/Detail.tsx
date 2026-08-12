@@ -3,8 +3,9 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Transcript } from "./Transcript";
+import { AskTab } from "./AskTab";
 import { formatDuration, formatMode, formatTime } from "../format";
-import type { HearsayEvent, MuteSpan, Segment } from "../types";
+import type { HearsayEvent, MuteSpan, Segment, Settings } from "../types";
 
 interface EventDetail {
   event: HearsayEvent;
@@ -19,9 +20,18 @@ interface TranscriptionEvent {
   channel?: string;
   message?: string;
   segments?: number;
+  /** How many passes are queued ahead of this one. Only on the "queued" stage. */
+  ahead?: number;
 }
 
-type Tab = "summary" | "transcript" | "audio";
+type Tab = "summary" | "transcript" | "ask" | "audio";
+
+const TAB_LABELS: Record<Tab, string> = {
+  summary: "Summary",
+  transcript: "Transcript",
+  ask: "Ask",
+  audio: "Audio",
+};
 
 interface Props {
   eventId: number | null;
@@ -42,7 +52,16 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
   const [progress, setProgress] = useState<TranscriptionEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playheadMs, setPlayheadMs] = useState<number | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Which provider is configured, and what to call the recorder. Read once: both are
+  // changed from Settings, which is a different view entirely.
+  useEffect(() => {
+    void invoke<Settings>("settings")
+      .then(setSettings)
+      .catch(() => undefined);
+  }, []);
 
   const load = useCallback(async () => {
     if (eventId === null) {
@@ -181,7 +200,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
         </div>
 
         <div className="tabs" role="tablist">
-          {(["summary", "transcript", "audio"] as Tab[]).map((name) => (
+          {(["summary", "transcript", "ask", "audio"] as Tab[]).map((name) => (
             <button
               type="button"
               key={name}
@@ -190,7 +209,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
               className={`tab${tab === name ? " active" : ""}`}
               onClick={() => setTab(name)}
             >
-              {name === "summary" ? "Summary" : name === "transcript" ? "Transcript" : "Audio"}
+              {TAB_LABELS[name]}
             </button>
           ))}
         </div>
@@ -217,6 +236,14 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
             muteSpans={muteSpans}
             onSeek={seek}
             activeMs={playheadMs}
+            speakerName={settings?.speaker_name}
+          />
+        ) : tab === "ask" ? (
+          <AskTab
+            eventId={event.id}
+            segmentCount={segments.length}
+            settings={settings}
+            onSeek={seek}
           />
         ) : (
           <AudioTab
@@ -284,6 +311,7 @@ function TranscriptionProgress({
 
   const downloading = progress.stage === "downloading";
   const transcribing = progress.stage === "transcribing";
+  const queued = progress.stage === "queued";
 
   // Downloads report their own percentage. Transcription reports per channel, so it is
   // scaled into the overall job.
@@ -293,24 +321,31 @@ function TranscriptionProgress({
       ? Math.min(100, ((done + (progress.percent ?? 0) / 100) / Math.max(channels, 1)) * 100)
       : null;
 
+  // Queued deserves its own words. One transcription runs at a time, so a recording made
+  // while an earlier one is still being transcribed waits — and a bar labelled
+  // "Transcribing" that sat at zero for ten minutes would look broken rather than patient.
   const label = downloading
     ? "Downloading the speech model — this happens once"
-    : progress.stage === "started"
-      ? "Getting ready"
-      : progress.stage === "model_ready"
-        ? "Model loaded, starting to listen"
-        : transcribing
-          ? channels > 1
-            ? `Transcribing ${progress.channel === "left" ? "your side" : "their side"} (${Math.min(done + 1, channels)} of ${channels})`
-            : "Transcribing"
-          : "Finishing up";
+    : progress.stage === "queued"
+      ? (progress.ahead ?? 1) > 1
+        ? `Waiting for ${progress.ahead} earlier transcriptions to finish`
+        : "Waiting for the transcription before it to finish"
+      : progress.stage === "started"
+        ? "Getting ready"
+        : progress.stage === "model_ready"
+          ? "Model loaded, starting to listen"
+          : transcribing
+            ? channels > 1
+              ? `Transcribing ${progress.channel === "left" ? "your side" : "their side"} (${Math.min(done + 1, channels)} of ${channels})`
+              : "Transcribing"
+            : "Finishing up";
 
   return (
     <div className="progress-card">
       <div className="progress-head">
         <span className="progress-label">{label}</span>
         {percent === null ? (
-          <span className="progress-percent">working…</span>
+          <span className="progress-percent">{queued ? "in line" : "working…"}</span>
         ) : (
           <span className="progress-percent mono">{Math.round(percent)}%</span>
         )}
@@ -548,8 +583,15 @@ function inlineToHtml(text: string): string {
 
 /// The same grammar [`renderMarkdown`] understands, emitted as HTML for the clipboard.
 ///
-/// Inline styles as well as semantic tags: some editors map `<h2>` to their own heading
-/// style and ignore everything else, and some do the opposite.
+/// Inline styles as well as semantic tags, because some editors keep the tag and ignore the
+/// style while others do the reverse.
+///
+/// **Section headings paste as bold body text, not as headings.** A `<h2>` is claimed by
+/// Google Docs' own Heading 2 style — a different face at a larger size, listed in the
+/// document outline — and no inline style overrides that, because Docs matches on the tag.
+/// A summary is usually pasted *into* a document that already has its own headings, where a
+/// borrowed outline level fights the surrounding structure. A bold line with space above it
+/// reads as a section wherever it lands and belongs to whatever it was pasted into.
 function summaryToHtml(markdown: string): string {
   const out: string[] = [];
   let bullets: string[] = [];
@@ -573,11 +615,11 @@ function summaryToHtml(markdown: string): string {
 
     const heading = /^(#{1,4})\s+(.*)$/.exec(line);
     if (heading?.[1] && heading[2] !== undefined) {
-      const tag = heading[1].length <= 2 ? "h2" : "h3";
-      const size = tag === "h2" ? "17pt" : "14pt";
+      // A paragraph carrying <strong>, at body size. Every heading level renders the same
+      // way: the summary prompt only ever writes one level of section, so a hierarchy here
+      // would be inventing a distinction the text does not make.
       out.push(
-        `<${tag} style="font-size:${size};font-weight:600;margin:16px 0 6px">` +
-          `${inlineToHtml(heading[2])}</${tag}>`,
+        `<p style="margin:16px 0 6px"><strong>${inlineToHtml(heading[2])}</strong></p>`,
       );
       continue;
     }

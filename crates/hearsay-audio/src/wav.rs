@@ -198,29 +198,52 @@ impl Drop for WavWriter {
     }
 }
 
+/// What a repaired file turned out to contain.
+///
+/// The format comes back alongside the frame count because the only reason to repair a
+/// file is to find out how long it is, and frames alone cannot answer that.
+#[derive(Debug, Clone, Copy)]
+pub struct Repaired {
+    pub frames: u64,
+    pub format: AudioFormat,
+}
+
+impl Repaired {
+    pub fn duration_ms(&self) -> u64 {
+        self.format.duration_ms(self.frames)
+    }
+}
+
 /// Rebuilds a WAV header's size fields from the file's actual length.
 ///
 /// For a recording cut short between header syncs: the audio is all there, but the
-/// header understates it by up to a second. Returns the number of frames the repaired
-/// file contains.
-pub fn repair(path: impl AsRef<Path>) -> Result<u64> {
+/// header understates it by up to a second. This is what turns a recording interrupted
+/// by sleep, a crash, or a force-quit back into a file that states its own true length.
+pub fn repair(path: impl AsRef<Path>) -> Result<Repaired> {
     use std::io::Read;
 
     let path = path.as_ref();
     let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
 
+    // Channel count and sample rate live at fixed offsets in the fmt chunk we wrote.
+    let mut fmt = [0u8; 6];
+    let format = if file.metadata()?.len() >= HEADER_LEN {
+        file.seek(SeekFrom::Start(22))?;
+        file.read_exact(&mut fmt)?;
+        AudioFormat::new(
+            u32::from_le_bytes([fmt[2], fmt[3], fmt[4], fmt[5]]),
+            u16::from_le_bytes([fmt[0], fmt[1]]).max(1),
+        )
+    } else {
+        // Too short to have a header at all: nothing was ever written.
+        return Ok(Repaired {
+            frames: 0,
+            format: AudioFormat::new(0, 1),
+        });
+    };
+
     let file_len = file.metadata()?.len();
-    if file_len < HEADER_LEN {
-        return Ok(0);
-    }
-
-    // Channel count and bit depth live at fixed offsets in the fmt chunk we wrote.
-    let mut channels_bytes = [0u8; 2];
-    file.seek(SeekFrom::Start(22))?;
-    file.read_exact(&mut channels_bytes)?;
-    let channels = u16::from_le_bytes(channels_bytes).max(1) as u64;
-
-    let bytes_per_frame = channels * (BITS_PER_SAMPLE as u64 / 8);
+    let bytes_per_frame = format.channels.max(1) as u64 * (BITS_PER_SAMPLE as u64 / 8);
     let data_len = file_len - HEADER_LEN;
     let frames = data_len / bytes_per_frame.max(1);
     // Never claim a partial frame exists.
@@ -232,7 +255,7 @@ pub fn repair(path: impl AsRef<Path>) -> Result<u64> {
     file.write_all(&(aligned_data_len as u32).to_le_bytes())?;
     file.sync_all()?;
 
-    Ok(frames)
+    Ok(Repaired { frames, format })
 }
 
 /// Float to 16-bit PCM, clamped. Values outside [-1, 1] would wrap around and turn a
@@ -329,11 +352,32 @@ mod tests {
         let (_, before) = read_back(&path);
         assert!(before.is_empty(), "header should still claim an empty file");
 
-        let frames = repair(&path).expect("repair should succeed");
-        assert_eq!(frames, 1000);
+        let repaired = repair(&path).expect("repair should succeed");
+        assert_eq!(repaired.frames, 1000);
 
         let (_, after) = read_back(&path);
         assert_eq!(after.len(), 1000);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Repair has to recover the format too, or a recovered recording has no duration.
+    #[test]
+    fn repair_reports_the_format_it_found() {
+        let path = temp_path("repair-format");
+        let format = AudioFormat::new(44_100, 2);
+        let mut writer = WavWriter::create(&path, format).expect("writer should be created");
+        writer
+            .write_samples(&vec![0.1f32; 44_100 * 2])
+            .expect("samples write");
+        writer.inner.flush().expect("flush should succeed");
+        std::mem::forget(writer);
+
+        let repaired = repair(&path).expect("repair should succeed");
+        assert_eq!(repaired.format.sample_rate, 44_100);
+        assert_eq!(repaired.format.channels, 2);
+        assert_eq!(repaired.frames, 44_100);
+        assert_eq!(repaired.duration_ms(), 1_000);
 
         let _ = std::fs::remove_file(&path);
     }

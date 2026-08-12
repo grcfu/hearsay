@@ -1,18 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { SystemStatus } from "../types";
-
-interface Settings {
-  has_api_key: boolean;
-  has_gemini_key: boolean;
-  provider: string;
-  speaker_name: string;
-  data_dir: string;
-  recordings_dir: string;
-  models_dir: string;
-  transcription_available: boolean;
-}
+import type { Settings, SystemStatus } from "../types";
 
 interface Props {
   status: SystemStatus | null;

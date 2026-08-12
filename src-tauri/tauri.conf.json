@@ -28,7 +28,7 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$APPDATA/hearsay/recordings/*"
+          "$HOME/Library/Application Support/hearsay/recordings/*"
         ]
       }
     }

@@ -5,6 +5,7 @@
 
 mod commands;
 mod permission;
+mod recovery;
 mod shortcuts;
 mod state;
 mod tray;
@@ -40,6 +41,10 @@ pub fn run() {
         }
     };
 
+    // Kept aside for the recovery pass in `setup`, which needs it before any command can
+    // reach the state that owns it.
+    let db_for_recovery = Arc::clone(&db);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -74,6 +79,9 @@ pub fn run() {
             commands::settings::clear_gemini_key,
             commands::settings::set_summary_provider,
             commands::summary::generate_summary,
+            commands::chat::chat_history,
+            commands::chat::ask_question,
+            commands::chat::clear_chat,
             commands::mute::mute_state,
             commands::mute::set_mute,
             commands::mute::toggle_mute,
@@ -83,12 +91,17 @@ pub fn run() {
             commands::calendar::disconnect_calendar,
             commands::calendar::link_to_calendar,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             // Recording is driven from the window; without one there is nothing to drive
             // it, so this is a hard failure rather than a warning.
             if app.get_webview_window("main").is_none() {
                 return Err("the main window is missing from tauri.conf.json".into());
             }
+
+            // Before anything can start a new recording: finish off whatever the last run
+            // was interrupted in the middle of. Runs here, synchronously, precisely
+            // because no command can be in flight yet — see `recovery`.
+            recovery::run(app.handle(), &db_for_recovery);
 
             // The menu bar item and the hotkeys are what make recording controllable
             // while the user is looking at their meeting app instead of at Hearsay.

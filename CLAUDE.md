@@ -11,12 +11,17 @@ These are not preferences. Violating any of them is a bug, even if the app still
 
 - **Nothing leaves the machine** except two named, opt-in exceptions, both using the
   user's own credentials:
-  1. **LLM summary calls** (Anthropic or Gemini), made only when the user asks for a
-     summary.
+  1. **LLM calls about one recording's transcript** (Anthropic or Gemini), made only
+     when the user asks for a summary (§8a) or sends a question about that recording
+     (§8b). One channel, two triggers, both requiring an explicit press. Never on a
+     timer, never in the background, never for a recording the user is not looking at.
   2. **Google Calendar reads** (§11), when the user connects a calendar — read-only,
      titles and times only, and nothing is ever uploaded.
 
   There is no third. Adding one is a spec change, not an implementation detail.
+
+  Audio is never uploaded by either. What goes out is transcript text, which was
+  produced on this machine.
 - **No analytics, no telemetry, no crash reporting, no update checks.** Do not add a dependency that
   phones home. If a crate or npm package does background network I/O, it does not belong here.
 
@@ -66,6 +71,15 @@ hearsay/
 ```
 
 Everything the app writes at runtime lives in `~/Library/Application Support/hearsay/`.
+
+**The asset protocol scope in `tauri.conf.json` must name that path literally**, as
+`$HOME/Library/Application Support/hearsay/recordings/*`. It reads as though `$APPDATA`
+belongs there, and it does not: Tauri expands `$APPDATA` to
+`~/Library/Application Support/<identifier>`, so `$APPDATA/hearsay/recordings/*` points at
+`.../com.hearsay.app/hearsay/recordings/*`, a directory nothing ever creates. Every
+recording is then blocked from the webview, the `<audio>` element never loads, and the
+Audio tab, click-to-seek, and the timestamps in an answer all silently do nothing — with
+one `asset protocol not configured to allow the path` line in the log as the only sign.
 
 ---
 
@@ -189,14 +203,45 @@ click-to-seek work.
 
 ```sql
 events(id, title, ai_title, calendar_event_id, started_at, ended_at,
-       mode, audio_path, summary_md, model_used, created_at)
+       mode, audio_path, summary_md, model_used, created_at, transcribed_at)
 
 segments(id, event_id, channel, start_ms, end_ms, text)   -- channel is 'mic' or 'system'
 
 mute_spans(id, event_id, start_ms, end_ms)
+
+chat_messages(id, event_id, role, content, created_at)    -- role is 'user' or 'assistant'
 ```
 
 FTS5 over `segments.text`.
+
+`transcribed_at` records that a pass *finished*, not that it found anything. Segment count
+cannot stand in for it: a recording of a silent room has none either way, and treating
+that as "never transcribed" would re-transcribe it on every launch forever.
+
+### Interrupted recordings
+
+`ended_at IS NULL` on a stored event means the app went away mid-recording — the machine
+slept, the process was killed, the power went. The audio is still there, because the WAV
+header is rewritten as the recording runs, so **a startup pass repairs and adopts these**:
+`wav::repair` restores the header, `ended_at` is set from the length of the audio rather
+than the clock, and anything with no finished transcription pass is queued for one.
+
+That pass runs **synchronously in `setup`, before Tauri's event loop starts.** That
+ordering is load-bearing: it is the only reason every unfinished event can safely be
+treated as abandoned. On a background thread it could finalise a session the user had just
+started.
+
+### One transcription at a time
+
+Each pass runs a `faster-whisper` process that takes every core it can get. Two of them
+alongside a live recording starve the writer thread, and audio the mixer drops is gone
+**with no marker in the transcript** — strictly worse than a transcript arriving later. So
+passes queue, oldest first, and a queued recording says so in its detail pane.
+
+Dropped audio is reported for the same reason a muted span is written down: it is a
+stretch of missing speech with nothing in the file to show it was ever captured. A live
+banner while it is happening, a warning at stop. Small amounts are normal — the mixer
+trims clock drift between two devices — so the alarm is a threshold, not any drop at all.
 
 ---
 
@@ -222,6 +267,34 @@ model reads and in rendered action items.
 
 Structure is enforced by a JSON schema on both providers, so summaries are never parsed
 out of prose.
+
+---
+
+## 8b. Asking about a recording
+
+The **Ask** tab answers questions about one recording. It exists for a specific reason:
+without it, finding one detail in an hour of transcript means pasting the whole transcript
+into somebody else's chat window — which sends the same text to a service the user did not
+choose, under an account they may not control. This sends it to the provider and key
+already configured, and only when a question is sent.
+
+The prompt lives in `crates/hearsay-core/src/chat.rs` as one editable string, like the
+summary prompt. Its rules:
+
+- **Answers come from the transcript and nothing else.** When it does not contain the
+  answer, say so and stop — no reasoning towards a likely answer, no general knowledge
+  offered instead. The user is asking what was said, not what is usually true.
+- **Timestamps are cited as `[MM:SS]`** and rendered as buttons that seek the audio, so an
+  answer can be checked rather than trusted.
+- **A `[mic muted]` span is never speculated about.** If the answer might lie inside one,
+  the answer is that it might lie inside one.
+- **Garbled transcription is reported, not silently corrected.**
+
+Free text, not a schema: an answer is prose, and there is no structure to enforce.
+
+Conversations are stored in `chat_messages` and deleted with the event. A question whose
+answer never arrives is **withdrawn** rather than left in place — kept, it would be
+replayed as history on every later question, sending the model a turn it never answered.
 
 ---
 

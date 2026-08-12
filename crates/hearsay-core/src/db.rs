@@ -92,6 +92,36 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     "#,
+    // 4: when transcription last finished for an event.
+    //
+    // Recovery needs to distinguish "never transcribed" from "transcribed and found
+    // nothing to say". Counting segments cannot: a recording of an empty room has none
+    // either way, and it would be re-transcribed on every launch forever.
+    //
+    // Existing events with segments are backfilled from `created_at`. The exact time is
+    // not knowable after the fact and does not matter — only that the pass happened.
+    r#"
+    ALTER TABLE events ADD COLUMN transcribed_at TEXT;
+
+    UPDATE events SET transcribed_at = created_at
+     WHERE id IN (SELECT DISTINCT event_id FROM segments);
+    "#,
+    // 5: questions asked about a recording, and the answers.
+    //
+    // Persisted rather than held in the window, so coming back to a recording next week
+    // shows what was already asked instead of an empty box. Deleted with the event, like
+    // segments — a question about a recording is meaningless once the recording is gone.
+    r#"
+    CREATE TABLE chat_messages (
+        id         INTEGER PRIMARY KEY,
+        event_id   INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        role       TEXT    NOT NULL CHECK (role IN ('user', 'assistant')),
+        content    TEXT    NOT NULL,
+        created_at TEXT    NOT NULL
+    );
+
+    CREATE INDEX idx_chat_messages_event ON chat_messages(event_id, id);
+    "#,
 ];
 
 /// A recording session and everything known about it.
@@ -111,6 +141,9 @@ pub struct Event {
     pub summary_md: Option<String>,
     pub model_used: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// When a transcription pass last completed. `None` means one has never finished —
+    /// which is what recovery looks for, and is not the same as having no segments.
+    pub transcribed_at: Option<DateTime<Utc>>,
 }
 
 impl Event {
@@ -143,6 +176,7 @@ impl Event {
             summary_md: row.get("summary_md")?,
             model_used: row.get("model_used")?,
             created_at: row.get("created_at")?,
+            transcribed_at: row.get("transcribed_at")?,
         })
     }
 }
@@ -190,6 +224,29 @@ impl MuteSpan {
             event_id: row.get("event_id")?,
             start_ms: row.get("start_ms")?,
             end_ms: row.get("end_ms")?,
+        })
+    }
+}
+
+/// One question asked about a recording, or one answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: i64,
+    pub event_id: i64,
+    /// `user` or `assistant`.
+    pub role: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ChatMessage {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            event_id: row.get("event_id")?,
+            role: row.get("role")?,
+            content: row.get("content")?,
+            created_at: row.get("created_at")?,
         })
     }
 }
@@ -285,6 +342,53 @@ impl Database {
                 params![ended_at, event_id],
             )?;
             Ok(())
+        })
+    }
+
+    /// Records that a transcription pass finished, whatever it found.
+    ///
+    /// Set even when the pass produced no segments. A recording of a silent room has
+    /// nothing to store, and without this it would look untranscribed forever.
+    pub fn mark_transcribed(&self, event_id: i64, at: DateTime<Utc>) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE events SET transcribed_at = ?1 WHERE id = ?2",
+                params![at, event_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Events that were never marked finished, oldest first.
+    ///
+    /// Only one recording runs at a time and `ended_at` is written when it stops, so at
+    /// startup every one of these is a session that was interrupted — by sleep, a crash,
+    /// or a force-quit. Meaningful only before recording begins; during a session the
+    /// live one is in here too.
+    pub fn unfinished_events(&self) -> Result<Vec<Event>> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT * FROM events WHERE ended_at IS NULL ORDER BY started_at ASC",
+            )?;
+            let events = statement
+                .query_map([], Event::from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(events)
+        })
+    }
+
+    /// Events with audio that no transcription pass has ever finished, oldest first.
+    pub fn untranscribed_events(&self) -> Result<Vec<Event>> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT * FROM events
+                  WHERE audio_path IS NOT NULL AND transcribed_at IS NULL
+                  ORDER BY started_at ASC",
+            )?;
+            let events = statement
+                .query_map([], Event::from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(events)
         })
     }
 
@@ -418,6 +522,56 @@ impl Database {
     }
 
     // -- mute spans --------------------------------------------------------------
+
+    // -- questions about a recording -----------------------------------------------
+
+    /// Every question and answer for an event, oldest first.
+    pub fn chat_messages(&self, event_id: i64) -> Result<Vec<ChatMessage>> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT * FROM chat_messages WHERE event_id = ?1 ORDER BY id ASC",
+            )?;
+            let messages = statement
+                .query_map(params![event_id], ChatMessage::from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(messages)
+        })
+    }
+
+    /// Appends one message and returns its id.
+    pub fn add_chat_message(&self, event_id: i64, role: &str, content: &str) -> Result<i64> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO chat_messages (event_id, role, content, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![event_id, role, content, Utc::now()],
+            )?;
+            Ok(connection.last_insert_rowid())
+        })
+    }
+
+    /// Forgets the whole conversation about an event. The transcript is untouched.
+    pub fn clear_chat(&self, event_id: i64) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM chat_messages WHERE event_id = ?1",
+                params![event_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Removes a single message. Used to take back a question whose answer never arrived,
+    /// so a failed attempt does not sit in the history forever.
+    pub fn delete_chat_message(&self, message_id: i64) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM chat_messages WHERE id = ?1",
+                params![message_id],
+            )?;
+            Ok(())
+        })
+    }
 
     pub fn replace_mute_spans(&self, event_id: i64, spans: &[(i64, i64)]) -> Result<()> {
         self.with_connection(|connection| {
@@ -666,6 +820,185 @@ mod tests {
         let event = db.event(id).expect("query works").expect("event exists");
         assert!(event.ended_at.is_some());
         assert!(event.duration_ms().unwrap_or(-1) >= 0);
+    }
+
+    // ---- recovering interrupted recordings ----
+
+    #[test]
+    fn an_unfinished_event_is_listed_until_it_is_finished() {
+        let (db, id) = seeded();
+        let unfinished = db.unfinished_events().expect("query works");
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0].id, id);
+
+        db.finish_event(id, Utc::now()).expect("finish works");
+        assert!(db.unfinished_events().expect("query works").is_empty());
+    }
+
+    #[test]
+    fn an_event_with_audio_is_untranscribed_until_a_pass_is_recorded() {
+        let (db, id) = seeded();
+        // No audio path yet, so there is nothing to transcribe.
+        assert!(db.untranscribed_events().expect("query works").is_empty());
+
+        db.set_audio_path(id, "/tmp/whatever.wav").expect("path is set");
+        let pending = db.untranscribed_events().expect("query works");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+
+        db.mark_transcribed(id, Utc::now()).expect("mark works");
+        assert!(db.untranscribed_events().expect("query works").is_empty());
+    }
+
+    /// The reason `transcribed_at` exists at all. A recording of a silent room produces no
+    /// segments, and if "no segments" meant "never transcribed" it would be re-transcribed
+    /// on every single launch, forever.
+    #[test]
+    fn a_transcribed_recording_with_no_speech_is_not_pending_again() {
+        let (db, id) = seeded();
+        db.set_audio_path(id, "/tmp/silence.wav").expect("path is set");
+        db.replace_segments(id, &[]).expect("an empty pass stores nothing");
+        db.mark_transcribed(id, Utc::now()).expect("mark works");
+
+        assert!(db.segments(id).expect("segments load").is_empty());
+        assert!(
+            db.untranscribed_events().expect("query works").is_empty(),
+            "a recording with nothing to say must not queue for transcription forever"
+        );
+    }
+
+    /// Recordings made before `transcribed_at` existed already have transcripts, and must
+    /// not all be re-transcribed the first time the new build starts.
+    #[test]
+    fn the_migration_backfills_events_that_already_have_segments() {
+        // A real database left at the schema version before `transcribed_at` existed.
+        let connection = Connection::open_in_memory().expect("connection opens");
+        Database::configure(&connection).expect("pragmas apply");
+        for (index, migration) in MIGRATIONS.iter().enumerate().take(3) {
+            let next = index + 1;
+            connection
+                .execute_batch(&format!(
+                    "BEGIN; {migration} PRAGMA user_version = {next}; COMMIT;"
+                ))
+                .expect("an earlier migration applies");
+        }
+
+        let now = Utc::now();
+        for (title, path) in [("Old, transcribed", "/tmp/a.wav"), ("Never transcribed", "/tmp/b.wav")] {
+            connection
+                .execute(
+                    "INSERT INTO events (title, mode, started_at, audio_path, created_at)
+                     VALUES (?1, 'listen_only', ?2, ?3, ?2)",
+                    params![title, now, path],
+                )
+                .expect("seed event inserts");
+        }
+        let transcribed = 1i64;
+        let never = 2i64;
+        connection
+            .execute(
+                "INSERT INTO segments (event_id, channel, start_ms, end_ms, text)
+                 VALUES (?1, 'system', 0, 10, 'something was said')",
+                params![transcribed],
+            )
+            .expect("seed segment inserts");
+
+        migrate(&connection).expect("the new migration applies");
+
+        let db = Database {
+            connection: Mutex::new(connection),
+        };
+        let pending: Vec<i64> = db
+            .untranscribed_events()
+            .expect("query works")
+            .into_iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(
+            pending,
+            vec![never],
+            "only the recording that never had a transcript should be pending"
+        );
+        assert!(db
+            .event(transcribed)
+            .expect("query works")
+            .expect("event exists")
+            .transcribed_at
+            .is_some());
+    }
+
+    // ---- questions about a recording ----
+
+    #[test]
+    fn a_conversation_round_trips_in_the_order_it_happened() {
+        let (db, id) = seeded();
+        db.add_chat_message(id, "user", "what did they say about pay?")
+            .expect("question stores");
+        db.add_chat_message(id, "assistant", "Nothing — it never came up.")
+            .expect("answer stores");
+        db.add_chat_message(id, "user", "who else was there?")
+            .expect("second question stores");
+
+        let messages = db.chat_messages(id).expect("history loads");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "what did they say about pay?");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[2].content, "who else was there?");
+    }
+
+    #[test]
+    fn clearing_a_conversation_leaves_the_transcript_alone() {
+        let (db, id) = seeded();
+        db.replace_segments(
+            id,
+            &[NewSegment {
+                channel: "system".into(),
+                start_ms: 0,
+                end_ms: 10,
+                text: "the transcript".into(),
+            }],
+        )
+        .expect("segments insert");
+        db.add_chat_message(id, "user", "anything?").expect("question stores");
+
+        db.clear_chat(id).expect("clear works");
+
+        assert!(db.chat_messages(id).expect("history loads").is_empty());
+        assert_eq!(
+            db.segments(id).expect("segments load").len(),
+            1,
+            "clearing questions must not touch the transcript"
+        );
+    }
+
+    /// A failed question is withdrawn so it is never replayed as history to the model.
+    #[test]
+    fn a_single_message_can_be_withdrawn() {
+        let (db, id) = seeded();
+        let first = db
+            .add_chat_message(id, "user", "kept")
+            .expect("question stores");
+        let second = db
+            .add_chat_message(id, "user", "withdrawn")
+            .expect("question stores");
+
+        db.delete_chat_message(second).expect("withdraw works");
+
+        let remaining = db.chat_messages(id).expect("history loads");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, first);
+    }
+
+    /// A question about a recording is meaningless once the recording is gone.
+    #[test]
+    fn deleting_a_recording_deletes_what_was_asked_about_it() {
+        let (db, id) = seeded();
+        db.add_chat_message(id, "user", "anything?").expect("question stores");
+
+        db.delete_event(id).expect("delete works");
+
+        assert!(db.chat_messages(id).expect("history loads").is_empty());
     }
 
     #[test]

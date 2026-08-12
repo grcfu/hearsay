@@ -5,6 +5,7 @@
 //! those behind.
 
 pub mod calendar;
+pub mod chat;
 pub mod events;
 pub mod mute;
 pub mod recording;

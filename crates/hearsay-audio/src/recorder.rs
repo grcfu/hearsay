@@ -39,6 +39,14 @@ const ANALYSIS_SECONDS: usize = 2;
 const FIRST_ECHO_CHECK: Duration = Duration::from_secs(12);
 const ECHO_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How much dropped audio counts as losing audio rather than trimming clock drift.
+///
+/// The mixer trims a channel that runs ahead of the clock, and two devices at a nominal
+/// 48 kHz drift by a few samples a minute, so a long meeting drops a little in normal
+/// operation. A whole second is far beyond drift and means the writer is being starved —
+/// usually by something else on the machine eating the CPU.
+const DROPPED_AUDIO_ALARM_MS: u64 = 1_000;
+
 /// What the UI reads while a recording is running.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RecordingStatus {
@@ -59,6 +67,16 @@ pub struct RecordingStatus {
     /// Set when the other party's voice is bleeding into the microphone. Advisory: it
     /// suggests headphones and changes nothing about the recording.
     pub echo: Option<EchoDetection>,
+    /// Audio captured but discarded because a channel outran the clock. Small values are
+    /// normal — the mixer trims drift — so read [`Self::losing_audio`] to decide whether
+    /// it matters.
+    pub dropped_ms: u64,
+    /// True once enough audio has been dropped to be a real gap rather than drift.
+    ///
+    /// Dropped audio leaves no marker in the transcript, so unlike a muted span it cannot
+    /// be explained after the fact. The user has to hear about it while the recording is
+    /// still running and something can be done about it.
+    pub losing_audio: bool,
 }
 
 /// A completed mute span, in milliseconds from the start of the recording.
@@ -75,6 +93,15 @@ pub struct RecordingOutcome {
     pub produced_audio: bool,
     /// Every stretch during which the microphone was writing zeros.
     pub mute_spans: Vec<MuteSpan>,
+    /// Frames captured but never written, because a channel outran the clock.
+    pub dropped_frames: u64,
+}
+
+impl RecordingOutcome {
+    /// Milliseconds of captured audio that never reached the file.
+    pub fn dropped_ms(&self) -> u64 {
+        self.format.duration_ms(self.dropped_frames)
+    }
 }
 
 /// Shared control surface, readable and writable from any thread.
@@ -421,6 +448,7 @@ fn spawn_writer(
         .spawn(move || {
             let mut produced_audio = false;
             let mut next_echo_check = FIRST_ECHO_CHECK;
+            let mut warned_about_drops = false;
 
             loop {
                 let stopping = shared.stop.load(Ordering::Relaxed);
@@ -472,8 +500,30 @@ fn spawn_writer(
                     }
                 }
 
+                // Dropped audio is the one loss that leaves no trace in the file: the
+                // frames are simply not there, and nothing downstream can tell they were
+                // ever captured. Counting them is useless unless somebody is told.
+                let dropped_frames = shared
+                    .mixer
+                    .lock()
+                    .map(|mixer| mixer.dropped_frames())
+                    .unwrap_or(0);
+                let dropped_ms = output_format.duration_ms(dropped_frames);
+                let losing_audio = dropped_ms >= DROPPED_AUDIO_ALARM_MS;
+
+                if losing_audio && !warned_about_drops {
+                    warned_about_drops = true;
+                    tracing::warn!(
+                        "dropped {dropped_ms} ms of captured audio — the writer is not \
+                         keeping up, and the dropped stretches will be missing from the \
+                         recording with no marker"
+                    );
+                }
+
                 if let Ok(mut status) = shared.status.lock() {
                     status.elapsed_ms = elapsed.as_millis() as u64;
+                    status.dropped_ms = dropped_ms;
+                    status.losing_audio = losing_audio;
                 }
 
                 if output_format.channels >= 2 && elapsed >= next_echo_check {
@@ -535,6 +585,12 @@ fn spawn_writer(
 
             writer.finalize()?;
 
+            let dropped_frames = shared
+                .mixer
+                .lock()
+                .map(|mixer| mixer.dropped_frames())
+                .unwrap_or(0);
+
             Ok(RecordingOutcome {
                 path: writer.path().to_path_buf(),
                 frames: writer.frames_written(),
@@ -542,6 +598,7 @@ fn spawn_writer(
                 format: output_format,
                 produced_audio,
                 mute_spans: Vec::new(),
+                dropped_frames,
             })
         })
         .map_err(AudioError::Io)

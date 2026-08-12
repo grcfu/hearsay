@@ -26,6 +26,8 @@ interface LiveStatus {
   silent_while_audio_playing: boolean;
   muted: boolean;
   echo: { lag_ms: number; correlation: number } | null;
+  dropped_ms: number;
+  losing_audio: boolean;
 }
 
 interface Props {
@@ -363,6 +365,16 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
             {live && !live.has_audio ? (
               <p className="small" style={{ opacity: 0.8, margin: "2px 6px 0" }}>
                 No audio captured yet. If this stays empty, the recording will be silent.
+              </p>
+            ) : null}
+            {/* Dropped audio leaves no marker in the transcript — unlike a muted span,
+                there is nothing afterwards to say it happened. So it has to be said now,
+                while the cause is still on the machine and can be closed. */}
+            {live?.losing_audio ? (
+              <p className="small" style={{ opacity: 0.9, margin: "2px 6px 0" }}>
+                Losing audio — {Math.round(live.dropped_ms / 1000)}s has been dropped
+                because this Mac cannot keep up. Quitting something heavy should stop it.
+                The dropped stretches will simply be missing.
               </p>
             ) : null}
           </>

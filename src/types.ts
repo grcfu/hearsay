@@ -15,6 +15,24 @@ export interface SystemStatus {
   problem: string | null;
 }
 
+/** What Settings shows and the detail pane needs to know about the summary provider. */
+export interface Settings {
+  has_api_key: boolean;
+  has_gemini_key: boolean;
+  provider: string;
+  speaker_name: string;
+  data_dir: string;
+  recordings_dir: string;
+  models_dir: string;
+  transcription_available: boolean;
+}
+
+/** Whether the provider currently selected has a key — mirrors `has_summary_key` in Rust. */
+export function hasSummaryKey(settings: Settings | null): boolean {
+  if (!settings) return false;
+  return settings.provider === "gemini" ? settings.has_gemini_key : settings.has_api_key;
+}
+
 export interface AudibleApp {
   key: string;
   name: string;
@@ -35,6 +53,9 @@ export interface HearsayEvent {
   summary_md: string | null;
   model_used: string | null;
   created_at: string;
+  /** When a transcription pass last finished. Null means one never has — which is not the
+   *  same as the recording having nothing to say. */
+  transcribed_at: string | null;
 }
 
 export interface Segment {
