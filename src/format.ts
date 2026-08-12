@@ -12,6 +12,28 @@ export function formatClock(ms: number): string {
     : `${pad(minutes)}:${pad(seconds)}`;
 }
 
+/**
+ * The inverse of {@link formatClock}, for a field someone types into.
+ *
+ * Accepts `H:MM:SS`, `MM:SS`, and a bare number of seconds, since all three are things a
+ * person reasonably types into a box showing `04:20`. Returns null for anything else rather
+ * than a guess — a silently misread selection would export the wrong part of the recording.
+ */
+export function parseClock(text: string): number | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+
+  const parts = trimmed.split(":");
+  if (parts.length > 3) return null;
+
+  let total = 0;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part.trim())) return null;
+    total = total * 60 + Number(part);
+  }
+  return total * 1000;
+}
+
 /** A short human duration, like "42 min" or "1 h 8 min". */
 export function formatDuration(ms: number | null): string {
   if (ms === null || ms <= 0) return "—";

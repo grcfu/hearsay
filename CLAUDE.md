@@ -305,6 +305,18 @@ a save sheet. Local only — this is a file copy, not a share, and no network is
 
 - The extension decides the format: **`.m4a`** (AAC at 96 kbps, roughly 43 MB an hour,
   the default the sheet prefills) or **`.wav`** (the original bytes, copied verbatim).
+- **A span can be saved instead of the whole recording** — the reason to keep audio is
+  usually one part of it. `wav::extract` cuts on a frame boundary and copies the sample
+  bytes across without decoding them, so a span of a `conversation` recording keeps its
+  two channels aligned. For an `.m4a` the cut happens first and the compression second,
+  because `afconvert` converts whole files and cannot trim; the intermediate WAV goes in
+  Hearsay's own directory, never `/tmp`, and is removed even when the export fails.
+- **A span is named in the file**, as `<title> <date> 3m12s to 8m45s.m4a`. A clip that
+  does not say which part of the meeting it is cannot be placed again later. No colons:
+  the Finder renders one as a slash.
+- **A selection that holds no audio is reported, not written.** Empty and reversed spans
+  are refused rather than clamped, and a start past the end of the recording is an error —
+  an exported file that opens and plays nothing is the same silent failure as a dead tap.
 - The AAC pass is `/usr/bin/afconvert`, which ships with macOS. **Do not bundle an
   encoder** and do not depend on a Homebrew `ffmpeg` or `lame` being present.
 - **`.mp3` is refused with an explanation**, not silently satisfied. macOS decodes MP3 and

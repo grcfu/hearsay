@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, save } from "@tauri-apps/plugin-dialog";
 import { Transcript } from "./Transcript";
 import { AskTab } from "./AskTab";
-import { formatDuration, formatMode, formatTime } from "../format";
+import { formatClock, formatDuration, formatMode, formatTime, parseClock } from "../format";
 import type {
   ExportedAudio,
   HearsayEvent,
@@ -501,42 +501,11 @@ function AudioTab({
   event: HearsayEvent;
 }) {
   const [retranscribing, setRetranscribing] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState<ExportedAudio | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [duration, setDuration] = useState<number | null>(null);
 
   if (!src) {
     return <p className="muted">This recording has no audio file.</p>;
   }
-
-  // The save sheet is the only place this can go: Hearsay picks no folder of its own, so
-  // the copy lands wherever the user says and nowhere else.
-  const saveCopy = async () => {
-    setProblem(null);
-    setSaved(null);
-    try {
-      const fileName = await invoke<string>("export_file_name", { eventId: event.id });
-      const destination = await save({
-        defaultPath: fileName,
-        title: "Save a copy of the audio",
-        filters: [
-          { name: "Compressed audio", extensions: ["m4a"] },
-          { name: "Original recording", extensions: ["wav"] },
-        ],
-      });
-      if (!destination) return;
-
-      setSaving(true);
-      setSaved(await invoke<ExportedAudio>("export_audio", {
-        eventId: event.id,
-        destination,
-      }));
-    } catch (failure) {
-      setProblem(String((failure as { message?: string })?.message ?? failure));
-    } finally {
-      setSaving(false);
-    }
-  };
 
   return (
     <div>
@@ -547,34 +516,17 @@ function AudioTab({
         preload="metadata"
         style={{ width: "100%" }}
         onTimeUpdate={(changed) => onTime(changed.currentTarget.currentTime * 1000)}
+        onLoadedMetadata={(loaded) => {
+          const seconds = loaded.currentTarget.duration;
+          // A file still being measured reports Infinity, and a span cannot be offered
+          // against a length nobody knows yet.
+          setDuration(Number.isFinite(seconds) ? seconds * 1000 : null);
+        }}
       />
 
-      <div className="row" style={{ marginTop: 14 }}>
-        <button type="button" className="button" disabled={saving} onClick={saveCopy}>
-          {saving ? "Saving…" : "Save a copy"}
-        </button>
-        <span className="small muted">
-          Writes an .m4a small enough to keep or send — or a .wav if you name one, which is
-          the recording untouched.
-          {event.mode === "conversation"
-            ? " Either way the channels stay as recorded: you on the left, everyone else on the right."
-            : ""}
-        </span>
-      </div>
+      <SaveCopy event={event} audioRef={audioRef} durationMs={duration} />
 
-      {saved ? (
-        <p className="small muted" style={{ marginTop: 8 }}>
-          Saved {formatBytes(saved.bytes)} to <span className="mono">{saved.path}</span>
-        </p>
-      ) : null}
-
-      {problem ? (
-        <div className="banner problem" style={{ marginTop: 10 }}>
-          {problem}
-        </div>
-      ) : null}
-
-      <div className="row" style={{ marginTop: 14 }}>
+      <div className="row" style={{ marginTop: 20 }}>
         <button
           type="button"
           className="button"
@@ -598,11 +550,179 @@ function AudioTab({
   );
 }
 
+/**
+ * Saving the audio out of Hearsay, whole or in part.
+ *
+ * The span picker is folded away by default. Most saves are of a whole recording, and two
+ * time fields presented to everyone who only wanted the file would be a decision where none
+ * was needed. Opened, it fills itself in from the playhead, because the moment someone wants
+ * a clip of is usually the moment they were just listening to.
+ */
+function SaveCopy({
+  event,
+  audioRef,
+  durationMs,
+}: {
+  event: HearsayEvent;
+  audioRef: React.MutableRefObject<HTMLAudioElement | null>;
+  durationMs: number | null;
+}) {
+  const [partial, setPartial] = useState(false);
+  const [startText, setStartText] = useState("00:00");
+  const [endText, setEndText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<ExportedAudio | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const startMs = parseClock(startText);
+  const endMs = parseClock(endText);
+  const spanIsUsable = startMs !== null && endMs !== null && endMs > startMs;
+  const spanLength = spanIsUsable ? endMs - startMs : null;
+
+  const playheadMs = () => Math.round((audioRef.current?.currentTime ?? 0) * 1000);
+
+  const openPicker = (wanted: boolean) => {
+    setPartial(wanted);
+    setProblem(null);
+    if (!wanted) return;
+    // From here to the end is the common case — someone listening to the part they want to
+    // keep sets the start and rarely needs to touch the end.
+    setStartText(formatClock(playheadMs()));
+    setEndText(formatClock(durationMs ?? playheadMs()));
+  };
+
+  // The save sheet is the only place this can go: Hearsay picks no folder of its own, so
+  // the copy lands wherever the user says and nowhere else.
+  const saveCopy = async () => {
+    setProblem(null);
+    setSaved(null);
+    const bounds = partial ? { startMs, endMs } : { startMs: null, endMs: null };
+    try {
+      const fileName = await invoke<string>("export_file_name", {
+        eventId: event.id,
+        ...bounds,
+      });
+      const destination = await save({
+        defaultPath: fileName,
+        title: partial ? "Save this part of the audio" : "Save a copy of the audio",
+        filters: [
+          { name: "Compressed audio", extensions: ["m4a"] },
+          { name: "Original recording", extensions: ["wav"] },
+        ],
+      });
+      if (!destination) return;
+
+      setSaving(true);
+      setSaved(
+        await invoke<ExportedAudio>("export_audio", {
+          eventId: event.id,
+          destination,
+          ...bounds,
+        }),
+      );
+    } catch (failure) {
+      setProblem(String((failure as { message?: string })?.message ?? failure));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="export">
+      <div className="row">
+        <button
+          type="button"
+          className="button"
+          disabled={saving || (partial && !spanIsUsable)}
+          onClick={saveCopy}
+        >
+          {saving ? "Saving…" : partial ? "Save this part" : "Save a copy"}
+        </button>
+        <label className="check small">
+          <input
+            type="checkbox"
+            checked={partial}
+            onChange={(changed) => openPicker(changed.currentTarget.checked)}
+          />
+          Just part of it
+        </label>
+      </div>
+
+      {partial ? (
+        <div className="export-span">
+          <span className="small muted">From</span>
+          <input
+            className={`time-input${startMs === null ? " invalid" : ""}`}
+            value={startText}
+            aria-label="Start of the part to save"
+            onChange={(changed) => setStartText(changed.currentTarget.value)}
+          />
+          <button
+            type="button"
+            className="button small"
+            onClick={() => setStartText(formatClock(playheadMs()))}
+          >
+            Use playhead
+          </button>
+          <span className="small muted">to</span>
+          <input
+            className={`time-input${endMs === null ? " invalid" : ""}`}
+            value={endText}
+            aria-label="End of the part to save"
+            onChange={(changed) => setEndText(changed.currentTarget.value)}
+          />
+          <button
+            type="button"
+            className="button small"
+            onClick={() => setEndText(formatClock(playheadMs()))}
+          >
+            Use playhead
+          </button>
+        </div>
+      ) : null}
+
+      <p className="small muted">
+        {partial ? (
+          spanLength === null ? (
+            "Times read as minutes and seconds — 4:20, or 1:04:20 past an hour."
+          ) : (
+            <>
+              <span className="mono">{formatClock(spanLength)}</span> of audio, about{" "}
+              {formatBytes(estimateAacBytes(spanLength))} as an .m4a.
+            </>
+          )
+        ) : (
+          <>
+            Writes an .m4a small enough to keep or send — or a .wav if you name one, which is
+            the recording untouched.
+            {event.mode === "conversation"
+              ? " Either way the channels stay as recorded: you on the left, everyone else on the right."
+              : ""}
+          </>
+        )}
+      </p>
+
+      {saved ? (
+        <p className="small muted">
+          Saved {formatBytes(saved.bytes)} to <span className="mono">{saved.path}</span>
+        </p>
+      ) : null}
+
+      {problem ? <div className="banner problem">{problem}</div> : null}
+    </div>
+  );
+}
+
 /** File size in the units a Finder window would use. */
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} bytes`;
   const mb = bytes / 1_000_000;
   return mb < 1 ? `${Math.round(bytes / 1000)} KB` : `${mb.toFixed(1)} MB`;
+}
+
+/** Roughly what a span will weigh once compressed: 96 kbps, the rate the export uses. */
+function estimateAacBytes(ms: number): number {
+  return Math.round((ms / 1000) * 12_000);
 }
 
 /**

@@ -889,6 +889,67 @@ select {
   background: var(--white);
 }
 
+/* ---------- Saving a copy of the audio ---------- */
+
+/*
+ * The span picker sits under the player and is folded away until asked for. Most saves are
+ * of a whole recording; the two time fields would otherwise be a decision presented to
+ * everyone who only wanted the file.
+ */
+.export {
+  margin-top: var(--s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  max-width: var(--measure);
+}
+
+.export-span {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  padding: var(--s3);
+  background: var(--swan);
+  border-radius: var(--radius-sm);
+}
+
+/* A checkbox is sapphire, like every other active control. Gold means recording. */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  cursor: default;
+}
+
+.check input {
+  accent-color: var(--sapphire);
+  margin: 0;
+}
+
+/* Times are set in the mono face with tabular figures, so the digits do not shift as they
+   are typed and a start lines up under an end. */
+.time-input {
+  width: 7.5ch;
+  padding: var(--s1) var(--s2);
+  border-radius: var(--radius-sm);
+  border: var(--hairline);
+  background: var(--white);
+  outline: none;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  text-align: center;
+}
+
+.time-input:focus {
+  border-color: var(--sapphire);
+}
+
+.time-input.invalid {
+  border-color: var(--danger);
+}
+
 /* ---------- Transcript ---------- */
 
 .transcript {

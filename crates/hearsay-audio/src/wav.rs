@@ -161,28 +161,53 @@ impl WavWriter {
     }
 
     fn write_header(&mut self, data_len: u32) -> Result<()> {
-        let channels = self.format.channels.max(1);
-        let block_align = channels * (BITS_PER_SAMPLE / 8);
-        let byte_rate = self.format.sample_rate * u32::from(block_align);
-
-        let header = &mut Vec::with_capacity(HEADER_LEN as usize);
-        header.extend_from_slice(b"RIFF");
-        header.extend_from_slice(&(HEADER_LEN as u32 - 8 + data_len).to_le_bytes());
-        header.extend_from_slice(b"WAVE");
-        header.extend_from_slice(b"fmt ");
-        header.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk length
-        header.extend_from_slice(&1u16.to_le_bytes()); // format tag: PCM
-        header.extend_from_slice(&channels.to_le_bytes());
-        header.extend_from_slice(&self.format.sample_rate.to_le_bytes());
-        header.extend_from_slice(&byte_rate.to_le_bytes());
-        header.extend_from_slice(&block_align.to_le_bytes());
-        header.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
-        header.extend_from_slice(b"data");
-        header.extend_from_slice(&data_len.to_le_bytes());
-
-        self.inner.write_all(header)?;
+        self.inner.write_all(&header_bytes(self.format, data_len))?;
         Ok(())
     }
+}
+
+/// The 44 bytes that precede the samples, for a file of `data_len` audio bytes.
+fn header_bytes(format: AudioFormat, data_len: u32) -> Vec<u8> {
+    let channels = format.channels.max(1);
+    let block_align = channels * (BITS_PER_SAMPLE / 8);
+    let byte_rate = format.sample_rate * u32::from(block_align);
+
+    let mut header = Vec::with_capacity(HEADER_LEN as usize);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(HEADER_LEN as u32 - 8 + data_len).to_le_bytes());
+    header.extend_from_slice(b"WAVE");
+    header.extend_from_slice(b"fmt ");
+    header.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk length
+    header.extend_from_slice(&1u16.to_le_bytes()); // format tag: PCM
+    header.extend_from_slice(&channels.to_le_bytes());
+    header.extend_from_slice(&format.sample_rate.to_le_bytes());
+    header.extend_from_slice(&byte_rate.to_le_bytes());
+    header.extend_from_slice(&block_align.to_le_bytes());
+    header.extend_from_slice(&BITS_PER_SAMPLE.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_len.to_le_bytes());
+    header
+}
+
+/// Reads the sample rate and channel count out of a file this module wrote.
+///
+/// `None` means the file is shorter than a header, so nothing was ever written to it.
+fn read_format(file: &mut File) -> Result<Option<AudioFormat>> {
+    use std::io::Read;
+
+    if file.metadata()?.len() < HEADER_LEN {
+        return Ok(None);
+    }
+
+    // Channel count and sample rate live at fixed offsets in the fmt chunk we wrote.
+    let mut fmt = [0u8; 6];
+    file.seek(SeekFrom::Start(22))?;
+    file.read_exact(&mut fmt)?;
+
+    Ok(Some(AudioFormat::new(
+        u32::from_le_bytes([fmt[2], fmt[3], fmt[4], fmt[5]]),
+        u16::from_le_bytes([fmt[0], fmt[1]]).max(1),
+    )))
 }
 
 impl Drop for WavWriter {
@@ -220,21 +245,10 @@ impl Repaired {
 /// header understates it by up to a second. This is what turns a recording interrupted
 /// by sleep, a crash, or a force-quit back into a file that states its own true length.
 pub fn repair(path: impl AsRef<Path>) -> Result<Repaired> {
-    use std::io::Read;
-
     let path = path.as_ref();
     let mut file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
 
-    // Channel count and sample rate live at fixed offsets in the fmt chunk we wrote.
-    let mut fmt = [0u8; 6];
-    let format = if file.metadata()?.len() >= HEADER_LEN {
-        file.seek(SeekFrom::Start(22))?;
-        file.read_exact(&mut fmt)?;
-        AudioFormat::new(
-            u32::from_le_bytes([fmt[2], fmt[3], fmt[4], fmt[5]]),
-            u16::from_le_bytes([fmt[0], fmt[1]]).max(1),
-        )
-    } else {
+    let Some(format) = read_format(&mut file)? else {
         // Too short to have a header at all: nothing was ever written.
         return Ok(Repaired {
             frames: 0,
@@ -256,6 +270,88 @@ pub fn repair(path: impl AsRef<Path>) -> Result<Repaired> {
     file.sync_all()?;
 
     Ok(Repaired { frames, format })
+}
+
+/// What an extracted span turned out to hold.
+#[derive(Debug, Clone, Copy)]
+pub struct Extracted {
+    pub frames: u64,
+    pub format: AudioFormat,
+}
+
+impl Extracted {
+    pub fn duration_ms(&self) -> u64 {
+        self.format.duration_ms(self.frames)
+    }
+}
+
+/// Writes the span between two instants of `source` into `destination` as its own WAV.
+///
+/// The samples are copied as bytes — 16-bit PCM in, the same 16-bit PCM out, with no
+/// decode and re-encode in between, so a span of a recording is exactly the bytes it was
+/// in the original. The cut lands on a frame boundary, which is what keeps a `conversation`
+/// recording's two channels aligned: half a frame of slippage would swap the mic and system
+/// samples for the rest of the file.
+///
+/// Bounds are clamped rather than refused. `end_ms` past the end of the recording means "to
+/// the end", which is what a request built from a rounded duration asks for. A span that
+/// clamps down to nothing returns zero frames for the caller to report — writing an empty
+/// WAV and calling it a success would be the same silent failure a dead tap produces.
+pub fn extract(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    start_ms: u64,
+    end_ms: u64,
+) -> Result<Extracted> {
+    use std::io::Read;
+
+    let mut input = File::open(source.as_ref())?;
+    let Some(format) = read_format(&mut input)? else {
+        return Ok(Extracted {
+            frames: 0,
+            format: AudioFormat::new(0, 1),
+        });
+    };
+
+    let bytes_per_frame = format.channels.max(1) as u64 * (BITS_PER_SAMPLE as u64 / 8);
+    let total_frames = input
+        .metadata()?
+        .len()
+        .saturating_sub(HEADER_LEN)
+        / bytes_per_frame.max(1);
+
+    let frame_at = |ms: u64| ms.saturating_mul(format.sample_rate as u64) / 1000;
+    let first = frame_at(start_ms).min(total_frames);
+    let last = frame_at(end_ms).min(total_frames);
+
+    if last <= first {
+        return Ok(Extracted { frames: 0, format });
+    }
+
+    // A WAV states its sizes in 32-bit fields, so a span cannot exceed 4 GB however long
+    // the recording is. At 48 kHz stereo that is six hours, and clamping keeps the header
+    // honest rather than wrapping it around to a small number.
+    let max_frames = (u32::MAX as u64) / bytes_per_frame.max(1);
+    let frames = (last - first).min(max_frames);
+    let data_len = frames * bytes_per_frame;
+
+    let mut output = BufWriter::new(File::create(destination.as_ref())?);
+    output.write_all(&header_bytes(format, data_len as u32))?;
+
+    input.seek(SeekFrom::Start(HEADER_LEN + first * bytes_per_frame))?;
+    let mut buffer = vec![0u8; 128 * 1024];
+    let mut remaining = data_len;
+    while remaining > 0 {
+        let want = remaining.min(buffer.len() as u64) as usize;
+        input.read_exact(&mut buffer[..want])?;
+        output.write_all(&buffer[..want])?;
+        remaining -= want as u64;
+    }
+
+    output.flush()?;
+    output.get_mut().sync_all()?;
+
+    Ok(Extracted { frames, format })
 }
 
 /// Float to 16-bit PCM, clamped. Values outside [-1, 1] would wrap around and turn a
@@ -401,5 +497,73 @@ mod tests {
         assert_eq!(to_i16(2.0), 32767);
         assert_eq!(to_i16(-2.0), -32767);
         assert_eq!(to_i16(0.0), 0);
+    }
+
+    /// One second of stereo where every frame is numbered, so an extracted span can be
+    /// checked against the frame it should have started at.
+    fn numbered_stereo(path: &Path, rate: u32) {
+        let mut writer = WavWriter::create(path, AudioFormat::new(rate, 2))
+            .expect("writer should be created");
+        for frame in 0..rate {
+            // Frame index in the left channel, its negation in the right.
+            let value = (frame % 20_000) as f32 / i16::MAX as f32;
+            writer
+                .write_samples(&[value, -value])
+                .expect("samples should write");
+        }
+        writer.finalize().expect("finalise should succeed");
+    }
+
+    #[test]
+    fn extracts_a_span_on_frame_boundaries() {
+        let source = temp_path("extract-source");
+        let span = temp_path("extract-span");
+        numbered_stereo(&source, 48_000);
+
+        let extracted = extract(&source, &span, 250, 750).expect("the span should be written");
+
+        assert_eq!(extracted.frames, 24_000, "half a second at 48 kHz");
+        assert_eq!(extracted.duration_ms(), 500);
+
+        let (spec, samples) = read_back(&span);
+        assert_eq!(spec.channels, 2, "a stereo span stays stereo");
+        assert_eq!(spec.sample_rate, 48_000);
+        assert_eq!(samples.len(), 48_000, "two channels of 24,000 frames");
+
+        // The first frame of the span is frame 12,000 of the recording, and its two
+        // channels are still the right way round.
+        assert_eq!(samples[0], 12_000);
+        assert_eq!(samples[1], -12_000);
+        assert_eq!(samples[2], 12_001);
+
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&span);
+    }
+
+    #[test]
+    fn an_end_past_the_recording_means_to_the_end() {
+        let source = temp_path("extract-clamp");
+        let span = temp_path("extract-clamp-out");
+        numbered_stereo(&source, 48_000);
+
+        let extracted = extract(&source, &span, 900, 60_000).expect("the span should be written");
+
+        assert_eq!(extracted.frames, 4_800, "the last 100 ms and no more");
+
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&span);
+    }
+
+    #[test]
+    fn a_span_that_selects_nothing_reports_zero_frames() {
+        let source = temp_path("extract-empty");
+        let span = temp_path("extract-empty-out");
+        numbered_stereo(&source, 48_000);
+
+        let extracted = extract(&source, &span, 5_000, 6_000).expect("the call should succeed");
+        assert_eq!(extracted.frames, 0, "a span past the end holds nothing");
+
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&span);
     }
 }
