@@ -7,9 +7,9 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 /// Which channel of a recording to transcribe.
 ///
@@ -156,7 +156,7 @@ pub fn transcribe_channel(
 ) -> Result<TranscriptionResult> {
     let paths = SidecarPaths::discover()?;
 
-    let mut child = Command::new(&paths.python)
+    let child = Command::new(&paths.python)
         .arg(&paths.script)
         .arg("--audio")
         .arg(audio_path)
@@ -172,29 +172,10 @@ pub fn transcribe_channel(
         .spawn()
         .with_context(|| format!("could not start {}", paths.script.display()))?;
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow!("sidecar produced no stderr"))?;
-
-    // Read progress on this thread's stderr reader while stdout accumulates in the pipe.
-    // The result is a single small JSON object, so the pipe buffer is ample.
-    let reader = BufReader::new(stderr);
-    let mut last_error: Option<(String, String)> = None;
-
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        let event = parse_event(&line);
-        if let TranscribeEvent::Error { kind, message } = &event {
-            last_error = Some((kind.clone(), message.clone()));
-        }
-        on_event(event);
-    }
-
-    let output = child.wait_with_output().context("sidecar did not exit")?;
+    let output = drain_sidecar(child, &mut on_event)?;
 
     if !output.status.success() {
-        if let Some((kind, message)) = last_error {
+        if let Some((kind, message)) = output.last_error {
             return Err(anyhow!("transcription failed ({kind}): {message}"));
         }
         return Err(anyhow!(
@@ -210,6 +191,71 @@ pub fn transcribe_channel(
     }
 
     serde_json::from_str(trimmed).with_context(|| "could not parse the transcription result")
+}
+
+/// Everything a finished sidecar produced.
+struct SidecarOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    /// The last error the sidecar reported, used to explain a non-zero exit.
+    last_error: Option<(String, String)>,
+}
+
+/// Reads a running sidecar to completion: progress from stderr, the result from stdout.
+///
+/// **Both pipes must be drained at the same time.** The result is a single JSON object,
+/// but it is not a small one — an hour of speech runs past a hundred kilobytes of
+/// segments, and a macOS pipe holds 64 KB at the very most. Reading stderr to EOF first
+/// and only then collecting stdout deadlocks the moment a transcript outgrows the pipe:
+/// the sidecar blocks in `write`, so it never exits, so it never closes stderr, so the
+/// loop waiting on stderr waits for a line that can no longer come. The pass hangs
+/// forever with the finished transcript stuck in the pipe, reporting no error and using
+/// no CPU.
+///
+/// This is not hypothetical. It stranded a 60-minute `listen_only` recording for 26
+/// hours. `conversation` recordings hid it for as long as they did only because their
+/// two passes halve each payload.
+fn drain_sidecar(
+    mut child: Child,
+    mut on_event: impl FnMut(TranscribeEvent),
+) -> Result<SidecarOutput> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("sidecar produced no stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("sidecar produced no stderr"))?;
+
+    // Collect stdout on its own thread so it keeps draining however long the stderr
+    // loop below runs, and whatever size the result turns out to be.
+    let collector = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        BufReader::new(stdout).read_to_end(&mut buffer).map(|_| buffer)
+    });
+
+    let mut last_error: Option<(String, String)> = None;
+    for line in BufReader::new(stderr).lines() {
+        let Ok(line) = line else { break };
+        let event = parse_event(&line);
+        if let TranscribeEvent::Error { kind, message } = &event {
+            last_error = Some((kind.clone(), message.clone()));
+        }
+        on_event(event);
+    }
+
+    let status = child.wait().context("sidecar did not exit")?;
+    let stdout = collector
+        .join()
+        .map_err(|_| anyhow!("the sidecar's output reader panicked"))?
+        .context("could not read the sidecar's output")?;
+
+    Ok(SidecarOutput {
+        status,
+        stdout,
+        last_error,
+    })
 }
 
 /// Transcribes a whole recording, one pass per channel, and returns every segment
@@ -349,6 +395,61 @@ mod tests {
             }
             other => panic!("expected an error event, got {other:?}"),
         }
+    }
+
+    /// The failure that stranded a 60-minute recording for 26 hours.
+    ///
+    /// The sidecar writes progress to stderr throughout and its result to stdout at the
+    /// very end. Draining stderr to EOF before touching stdout deadlocks as soon as the
+    /// result outgrows the pipe, so this fake sidecar reproduces that exact order with a
+    /// result far too big to fit.
+    ///
+    /// The timeout is the point of the test: the regression is a hang, not a wrong
+    /// answer, and an unguarded version of this test would never finish.
+    #[test]
+    fn a_result_too_large_for_the_pipe_does_not_deadlock() {
+        const CHUNKS: usize = 8192;
+        const PROGRESS_LINES: usize = 50;
+
+        // 512 KB of stdout, comfortably past the 64 KB a macOS pipe will ever hold, and
+        // written only after every stderr line — exactly what transcribe.py does.
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                r#"i=0
+                   while [ $i -lt 50 ]; do
+                     printf '{"type":"progress","channel":"mono","percent":1}\n' >&2
+                     i=$((i + 1))
+                   done
+                   awk 'BEGIN { while (n++ < 8192) printf "%064d", n }'"#,
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("the fake sidecar should start");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut seen = 0usize;
+            let drained = drain_sidecar(child, |event| {
+                if matches!(event, TranscribeEvent::Progress { .. }) {
+                    seen += 1;
+                }
+            });
+            let _ = sender.send(drained.map(|output| (output.stdout.len(), seen)));
+        });
+
+        let (bytes, progress) = receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("draining deadlocked: stdout went unread while stderr was consumed")
+            .expect("the fake sidecar should drain cleanly");
+
+        assert_eq!(bytes, CHUNKS * 64, "the whole result should survive the pipe");
+        assert_eq!(
+            progress, PROGRESS_LINES,
+            "every progress event should still have been reported"
+        );
     }
 
     #[test]
