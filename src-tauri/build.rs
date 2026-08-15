@@ -24,8 +24,36 @@ fn main() {
 
     println!("cargo:rustc-env=HEARSAY_BUILT_COMMIT={commit}");
     println!("cargo:rustc-env=HEARSAY_REPO_DIR={}", repo.display());
+
     // Rebuild when the checked-out commit changes, so the stamp never goes stale.
-    println!("cargo:rerun-if-changed={}", repo.join(".git/HEAD").display());
+    //
+    // Watching `.git/HEAD` alone does not do that. While a branch is checked out HEAD
+    // holds the text `ref: refs/heads/<branch>`, and committing does not change it —
+    // the new commit is written to the ref file HEAD points at. So HEAD on its own
+    // misses every commit made on the current branch, which is the ordinary case, and
+    // the binary goes on reporting whatever commit it first compiled against. That
+    // shows up as the app claiming to be out of date immediately after being rebuilt
+    // from the very commit it is complaining about.
+    let git_dir = repo.join(".git");
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+
+    // A detached HEAD stores the commit in HEAD itself, so it is already covered above.
+    if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD")) {
+        if let Some(reference) = head.trim().strip_prefix("ref:") {
+            println!(
+                "cargo:rerun-if-changed={}",
+                git_dir.join(reference.trim()).display()
+            );
+        }
+    }
+
+    // Once git packs refs the loose file above disappears and the branch tip lives here
+    // instead. Only watched when it exists: naming a missing path makes cargo treat the
+    // build script as dirty on every single build.
+    let packed_refs = git_dir.join("packed-refs");
+    if packed_refs.is_file() {
+        println!("cargo:rerun-if-changed={}", packed_refs.display());
+    }
 
     tauri_build::build()
 }
