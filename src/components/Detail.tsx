@@ -9,6 +9,7 @@ import type {
   ExportedAudio,
   HearsayEvent,
   MuteSpan,
+  ReclaimedAudio,
   Segment,
   Settings,
 } from "../types";
@@ -257,6 +258,10 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
             audioRef={audioRef}
             onTime={setPlayheadMs}
             event={event}
+            onChanged={() => {
+              void load();
+              onChanged();
+            }}
           />
         )}
 
@@ -494,11 +499,13 @@ function AudioTab({
   audioRef,
   onTime,
   event,
+  onChanged,
 }: {
   src: string | null;
   audioRef: React.MutableRefObject<HTMLAudioElement | null>;
   onTime: (ms: number) => void;
   event: HearsayEvent;
+  onChanged: () => void;
 }) {
   const [retranscribing, setRetranscribing] = useState(false);
   const [duration, setDuration] = useState<number | null>(null);
@@ -570,6 +577,75 @@ function AudioTab({
           Re-runs transcription from the audio. Replaces the existing transcript.
         </span>
       </div>
+
+      <DeleteAudio event={event} onDeleted={onChanged} />
+    </div>
+  );
+}
+
+/**
+ * Throwing away the audio and keeping everything written from it.
+ *
+ * The recording is the largest thing Hearsay stores by a wide margin, and once a
+ * transcript exists it is often no longer wanted. This is the only way to reclaim that
+ * space, and it is deliberately a per-recording decision made by hand: nothing here runs
+ * on a timer, sweeps the archive, or deletes anything the user did not point at.
+ *
+ * Untranscribed audio is refused rather than confirmed away. Deleting it would leave the
+ * recording as an empty row — not a saving, but the loss of the whole thing.
+ */
+function DeleteAudio({ event, onDeleted }: { event: HearsayEvent; onDeleted: () => void }) {
+  const [working, setWorking] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [freed, setFreed] = useState<number | null>(null);
+
+  const transcribed = event.transcribed_at !== null;
+
+  const remove = async () => {
+    // Every consequence named, because none of them can be undone and one of them —
+    // never being able to transcribe this recording again — is easy not to think of.
+    const confirmed = await ask(
+      `Delete the audio for "${event.title}"?\n\nThe transcript, summary and questions stay, and stay searchable. Playback, jumping to a timestamp, saving a copy and transcribing this recording again all go, permanently.`,
+      {
+        title: "Delete the audio",
+        kind: "warning",
+        okLabel: "Delete the audio",
+        cancelLabel: "Keep it",
+      },
+    );
+    if (!confirmed) return;
+
+    setWorking(true);
+    setProblem(null);
+    try {
+      const reclaimed = await invoke<ReclaimedAudio>("delete_audio", { eventId: event.id });
+      setFreed(reclaimed.bytes);
+      onDeleted();
+    } catch (failure) {
+      setProblem(String((failure as { message?: string })?.message ?? failure));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <div className="row" style={{ marginTop: 20 }}>
+      <button
+        type="button"
+        className="button destructive small"
+        onClick={remove}
+        disabled={working || !transcribed}
+      >
+        {working ? "Deleting…" : "Delete the audio"}
+      </button>
+      <span className="small muted">
+        {problem ??
+          (freed !== null
+            ? `Freed ${formatBytes(freed)}.`
+            : transcribed
+              ? "Frees the space, keeps the transcript. This cannot be undone."
+              : "Needs a transcript first — deleting the audio now would leave nothing.")}
+      </span>
     </div>
   );
 }
