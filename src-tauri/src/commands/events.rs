@@ -2,6 +2,7 @@
 
 use crate::state::{AppState, CommandError, CommandResult};
 use hearsay_core::db::{Event, MuteSpan, SearchHit, Segment};
+use hearsay_core::storage;
 use serde::Serialize;
 use tauri::State;
 
@@ -91,4 +92,84 @@ pub fn delete_event(state: State<'_, AppState>, event_id: i64) -> CommandResult<
         }),
         None => Ok(()),
     }
+}
+
+/// How much disk a deletion gave back.
+#[derive(Debug, Serialize)]
+pub struct ReclaimedAudio {
+    pub bytes: u64,
+}
+
+/// Deletes a recording's audio, keeping everything written from it.
+///
+/// The transcript, the summary, the search index and the questions all survive, because
+/// none of them are derived from the file — segments are the source of truth and they are
+/// stored as rows. What is lost is playback, click-to-seek, saving a copy, and the ability
+/// to ever transcribe this recording again.
+///
+/// That last one is why this refuses more than it strictly has to. The audio is the only
+/// thing here that cannot be rebuilt from anything else, so a deletion that leaves nothing
+/// behind is not a saving, it is a loss of the whole recording:
+///
+/// - a recording still being made has a file that is still being written;
+/// - a recording with a pass in flight is being read right now, and would fail partway;
+/// - a recording that has never been transcribed has nothing to keep, so deleting its
+///   audio would throw away everything it was rather than only the largest part.
+#[tauri::command]
+pub fn delete_audio(state: State<'_, AppState>, event_id: i64) -> CommandResult<ReclaimedAudio> {
+    if let Some(active) = state.lock_recording()?.as_ref() {
+        if active.event_id == event_id {
+            return Err(CommandError {
+                message: "this recording is still running — stop it first".to_string(),
+            });
+        }
+    }
+
+    if super::transcription::is_transcribing(event_id) {
+        return Err(CommandError {
+            message: "this recording is being transcribed right now. Wait for the \
+                      transcript, then the audio can go."
+                .to_string(),
+        });
+    }
+
+    let event = state.db.event(event_id)?.ok_or_else(|| CommandError {
+        message: format!("no recording with id {event_id}"),
+    })?;
+
+    if event.audio_was_deleted() {
+        return Err(CommandError {
+            message: "the audio for this recording has already been deleted".to_string(),
+        });
+    }
+
+    let path = event.audio_path.clone().ok_or_else(|| CommandError {
+        message: "this recording has no audio file".to_string(),
+    })?;
+
+    if event.transcribed_at.is_none() {
+        return Err(CommandError {
+            message: "this recording has never been transcribed. Deleting its audio now \
+                      would leave nothing at all — transcribe it first."
+                .to_string(),
+        });
+    }
+
+    // Measured before the file goes, so the reclaimed figure is the real one rather than
+    // an estimate from the recording's duration.
+    let bytes = storage::audio_bytes(Some(&path)).unwrap_or(0);
+
+    let file = std::path::Path::new(&path);
+    if file.exists() {
+        std::fs::remove_file(file).map_err(|error| CommandError {
+            message: format!("could not delete the audio file — {}: {error}", file.display()),
+        })?;
+    }
+
+    // Only once the file is actually gone. Marking first and failing to remove it would
+    // orphan the audio: still on disk, taking the same space, with nothing left in the
+    // database pointing at it to try again.
+    state.db.mark_audio_deleted(event_id)?;
+
+    Ok(ReclaimedAudio { bytes })
 }
