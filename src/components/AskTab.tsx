@@ -20,6 +20,8 @@ interface Props {
   settings: Settings | null;
   /** Jump the player to a timestamp the answer cited. */
   onSeek: (ms: number) => void;
+  /** Whether there is audio to jump to. False once the audio has been deleted. */
+  canSeek: boolean;
 }
 
 /**
@@ -33,7 +35,7 @@ interface Props {
  *
  * The conversation is stored, so coming back to a recording shows what was already asked.
  */
-export function AskTab({ eventId, segmentCount, settings, onSeek }: Props) {
+export function AskTab({ eventId, segmentCount, settings, onSeek, canSeek }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -184,7 +186,7 @@ export function AskTab({ eventId, segmentCount, settings, onSeek }: Props) {
             <div className="ask-role">{message.role === "user" ? "You asked" : "Answer"}</div>
             <div className="ask-content">
               {message.role === "assistant"
-                ? withTimestamps(message.content, onSeek)
+                ? withTimestamps(message.content, onSeek, canSeek)
                 : message.content}
             </div>
           </div>
@@ -248,9 +250,13 @@ export function AskTab({ eventId, segmentCount, settings, onSeek }: Props) {
  * recording rather than taken on trust. Making them clickable is what turns that from a
  * promise into something one keystroke away.
  *
+ * With the audio deleted they stay visible but stop being buttons. The citation is still
+ * worth something — it says where in the transcript to look — and a button that silently
+ * does nothing would be worth less than plain text.
+ *
  * Everything else is rendered as a text node, so nothing in an answer can inject markup.
  */
-function withTimestamps(text: string, onSeek: (ms: number) => void) {
+function withTimestamps(text: string, onSeek: (ms: number) => void, canSeek: boolean) {
   const pattern = /\[(\d{1,2}):([0-5]\d)\]/g;
   const parts: React.ReactNode[] = [];
   let last = 0;
@@ -261,15 +267,25 @@ function withTimestamps(text: string, onSeek: (ms: number) => void) {
     if (match.index > last) parts.push(text.slice(last, match.index));
     const ms = (Number(match[1]) * 60 + Number(match[2])) * 1000;
     parts.push(
-      <button
-        type="button"
-        key={`at-${key++}`}
-        className="ask-timestamp mono"
-        onClick={() => onSeek(ms)}
-        title="Play from here"
-      >
-        {match[0]}
-      </button>,
+      canSeek ? (
+        <button
+          type="button"
+          key={`at-${key++}`}
+          className="ask-timestamp mono"
+          onClick={() => onSeek(ms)}
+          title="Play from here"
+        >
+          {match[0]}
+        </button>
+      ) : (
+        <span
+          key={`at-${key++}`}
+          className="ask-timestamp mono static"
+          title="The audio for this recording was deleted"
+        >
+          {match[0]}
+        </span>
+      ),
     );
     last = match.index + match[0].length;
   }

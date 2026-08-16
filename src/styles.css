@@ -981,6 +981,21 @@ select {
   border-color: var(--sapphire);
 }
 
+/* No audio to seek to: the line is still the transcript, so it stays fully legible and
+   selectable. Only the offer to jump is withdrawn — no hover, no pointer, no dimming. */
+.transcript-line.static {
+  cursor: default;
+  user-select: text;
+}
+
+.transcript-line.static:hover {
+  background: transparent;
+}
+
+.transcript-line.static.active {
+  background: var(--swan);
+}
+
 .transcript-time {
   font-size: 12px;
   color: var(--sapphire);
@@ -1083,6 +1098,18 @@ select {
 .ask-timestamp:hover {
   background: var(--swan);
   border-color: var(--shellstone);
+}
+
+/* The audio is gone, so the citation is no longer a way into it. It stays readable —
+   it still says where in the transcript to look — but stops behaving like a control. */
+.ask-timestamp.static {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.ask-timestamp.static:hover {
+  background: transparent;
+  border-color: transparent;
 }
 
 .ask-compose {

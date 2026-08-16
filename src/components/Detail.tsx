@@ -244,6 +244,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
             onSeek={seek}
             activeMs={playheadMs}
             speakerName={settings?.speaker_name}
+            canSeek={audioSrc !== null}
           />
         ) : tab === "ask" ? (
           <AskTab
@@ -251,6 +252,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
             segmentCount={segments.length}
             settings={settings}
             onSeek={seek}
+            canSeek={audioSrc !== null}
           />
         ) : (
           <AudioTab
