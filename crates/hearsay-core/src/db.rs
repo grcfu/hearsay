@@ -122,6 +122,21 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE INDEX idx_chat_messages_event ON chat_messages(event_id, id);
     "#,
+    // 6: when the audio was deliberately deleted, keeping the transcript.
+    //
+    // A recording's WAV is by far the largest thing Hearsay writes — hundreds of
+    // megabytes an hour — and once a transcript exists the audio is often no longer
+    // wanted. Deleting it leaves the segments, the summary, the search index and the
+    // questions all intact, because none of them are derived from the file.
+    //
+    // Its own column rather than an inference from `audio_path IS NULL`, for the same
+    // reason `transcribed_at` exists: absence cannot say why. A recording whose file
+    // never arrived and one whose audio was thrown away on purpose would otherwise look
+    // identical, and the second needs to say so — the seek buttons in its transcript are
+    // inert, and that has to read as a consequence rather than as a fault.
+    r#"
+    ALTER TABLE events ADD COLUMN audio_deleted_at TEXT;
+    "#,
 ];
 
 /// A recording session and everything known about it.
@@ -144,6 +159,10 @@ pub struct Event {
     /// When a transcription pass last completed. `None` means one has never finished —
     /// which is what recovery looks for, and is not the same as having no segments.
     pub transcribed_at: Option<DateTime<Utc>>,
+    /// When the audio was deleted on purpose, the transcript being kept. `None` covers
+    /// both "the audio is still there" and "there never was any" — `audio_path` tells
+    /// those two apart, and this tells them apart from a deliberate deletion.
+    pub audio_deleted_at: Option<DateTime<Utc>>,
 }
 
 impl Event {
@@ -177,7 +196,21 @@ impl Event {
             model_used: row.get("model_used")?,
             created_at: row.get("created_at")?,
             transcribed_at: row.get("transcribed_at")?,
+            audio_deleted_at: row.get("audio_deleted_at")?,
         })
+    }
+
+    /// Whether the audio was deleted on purpose while the transcript was kept.
+    pub fn audio_was_deleted(&self) -> bool {
+        self.audio_deleted_at.is_some()
+    }
+
+    /// Whether there is a file to play, seek, re-transcribe, or export.
+    ///
+    /// Only says a path is recorded, not that it is still on disk — a caller that needs
+    /// the file itself has to stat it.
+    pub fn has_audio(&self) -> bool {
+        self.audio_path.is_some()
     }
 }
 
@@ -454,6 +487,26 @@ impl Database {
             connection.execute(
                 "UPDATE events SET audio_path = ?1 WHERE id = ?2",
                 params![audio_path, event_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Records that a recording's audio was deleted while its transcript was kept.
+    ///
+    /// Clears `audio_path` in the same statement. Leaving the path behind would point
+    /// every reader at a file that is not there: the webview would build an `<audio>`
+    /// source that never loads, and [`Database::untranscribed_events`] — which keys on
+    /// `audio_path IS NOT NULL` — would offer the recording up for transcription on
+    /// every launch from now on.
+    ///
+    /// Deleting the file itself is the caller's job, as with [`Database::delete_event`].
+    /// The database does not remove a user's recording behind their back.
+    pub fn mark_audio_deleted(&self, event_id: i64) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE events SET audio_path = NULL, audio_deleted_at = ?1 WHERE id = ?2",
+                params![Utc::now(), event_id],
             )?;
             Ok(())
         })
@@ -864,6 +917,73 @@ mod tests {
         assert!(
             db.untranscribed_events().expect("query works").is_empty(),
             "a recording with nothing to say must not queue for transcription forever"
+        );
+    }
+
+    // ---- deleting the audio while keeping the transcript ----
+
+    #[test]
+    fn deleting_the_audio_keeps_the_transcript_and_the_summary() {
+        let (db, id) = seeded();
+        db.set_audio_path(id, "/tmp/big.wav").expect("path is set");
+        db.replace_segments(
+            id,
+            &[NewSegment {
+                channel: "system".into(),
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "the deadline is the fourth".into(),
+            }],
+        )
+        .expect("segments store");
+        db.mark_transcribed(id, Utc::now()).expect("mark works");
+        db.set_summary(id, "## Worth remembering", None, "test-model")
+            .expect("summary stores");
+
+        db.mark_audio_deleted(id).expect("the audio is marked gone");
+
+        let event = db.event(id).expect("query works").expect("event exists");
+        assert!(event.audio_was_deleted());
+        assert!(!event.has_audio(), "the dangling path must be cleared");
+        assert_eq!(
+            db.segments(id).expect("segments load").len(),
+            1,
+            "segments are the source of truth and outlive the audio"
+        );
+        assert!(event.summary_md.is_some());
+        assert_eq!(
+            db.search("deadline", 10).expect("search works").len(),
+            1,
+            "the search index reads through to segments, not to the file"
+        );
+    }
+
+    /// The reason `mark_audio_deleted` clears `audio_path` rather than only stamping the
+    /// date. Left in place, the path would offer the recording for transcription on every
+    /// launch — against a file that is deliberately not there.
+    #[test]
+    fn a_recording_whose_audio_was_deleted_never_queues_for_transcription() {
+        let (db, id) = seeded();
+        db.set_audio_path(id, "/tmp/big.wav").expect("path is set");
+        assert_eq!(db.untranscribed_events().expect("query works").len(), 1);
+
+        db.mark_audio_deleted(id).expect("the audio is marked gone");
+        assert!(
+            db.untranscribed_events().expect("query works").is_empty(),
+            "deleted audio must not be queued for a pass that can only fail"
+        );
+    }
+
+    /// Deletion is not the same as never having had a file, and the difference has to
+    /// survive a round trip — it is what the Audio tab reads to explain itself.
+    #[test]
+    fn a_recording_that_never_had_audio_is_not_reported_as_deleted() {
+        let (db, id) = seeded();
+        let event = db.event(id).expect("query works").expect("event exists");
+        assert!(!event.has_audio());
+        assert!(
+            !event.audio_was_deleted(),
+            "no audio is not the same as audio thrown away"
         );
     }
 
