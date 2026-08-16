@@ -10,6 +10,7 @@ pub mod dedupe;
 pub mod export;
 pub mod paths;
 pub mod secrets;
+pub mod storage;
 pub mod summary;
 pub mod transcribe;
 
