@@ -269,6 +269,17 @@ pub fn retranscribe(
         message: format!("no recording with id {event_id}"),
     })?;
 
+    // Deleted audio is a different situation from audio that never arrived, and the
+    // difference is the whole point of saying so: one is a fault to look into, the other
+    // is a choice the user made and the reason this can never work again.
+    if event.audio_was_deleted() {
+        return Err(CommandError {
+            message: "the audio for this recording was deleted, so it cannot be \
+                      transcribed again. The transcript it produced is still here."
+                .to_string(),
+        });
+    }
+
     let path = event.audio_path.clone().ok_or_else(|| CommandError {
         message: "this recording has no audio file".to_string(),
     })?;

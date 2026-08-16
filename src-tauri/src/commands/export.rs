@@ -92,6 +92,16 @@ pub fn export_audio(
         message: format!("no recording with id {event_id}"),
     })?;
 
+    // Said plainly, because the Audio tab hides this button once the audio is gone and
+    // reaching here at all means something is out of step — a stale window, most likely.
+    if event.audio_was_deleted() {
+        return Err(CommandError {
+            message: "the audio for this recording was deleted, so there is nothing to \
+                      save a copy of. Its transcript is still here."
+                .to_string(),
+        });
+    }
+
     let source = event
         .audio_path
         .map(PathBuf::from)
