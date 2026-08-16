@@ -4,7 +4,14 @@ import { listen } from "@tauri-apps/api/event";
 import { ask, save } from "@tauri-apps/plugin-dialog";
 import { Transcript } from "./Transcript";
 import { AskTab } from "./AskTab";
-import { formatClock, formatDuration, formatMode, formatTime, parseClock } from "../format";
+import {
+  formatBytes,
+  formatClock,
+  formatDuration,
+  formatMode,
+  formatTime,
+  parseClock,
+} from "../format";
 import type {
   ExportedAudio,
   HearsayEvent,
@@ -813,13 +820,6 @@ function SaveCopy({
       {problem ? <div className="banner problem">{problem}</div> : null}
     </div>
   );
-}
-
-/** File size in the units a Finder window would use. */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} bytes`;
-  const mb = bytes / 1_000_000;
-  return mb < 1 ? `${Math.round(bytes / 1000)} KB` : `${mb.toFixed(1)} MB`;
 }
 
 /** Roughly what a span will weigh once compressed: 96 kbps, the rate the export uses. */

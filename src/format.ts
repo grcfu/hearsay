@@ -85,3 +85,11 @@ export function dayKey(iso: string): string {
 export function formatMode(mode: string): string {
   return mode === "conversation" ? "Conversation" : "Listen only";
 }
+
+/** File size in the units a Finder window would use. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
+  const mb = bytes / 1_000_000;
+  if (mb < 1) return `${Math.round(bytes / 1000)} KB`;
+  return mb < 1000 ? `${mb.toFixed(1)} MB` : `${(mb / 1000).toFixed(2)} GB`;
+}

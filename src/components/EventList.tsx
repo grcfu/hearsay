@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { dayKey, formatDayHeading, formatDuration, formatMode, formatTime } from "../format";
-import type { HearsayEvent, SearchHit } from "../types";
+import {
+  dayKey,
+  formatBytes,
+  formatDayHeading,
+  formatDuration,
+  formatMode,
+  formatTime,
+} from "../format";
+import type { AudioUsage, HearsayEvent, SearchHit } from "../types";
 
 interface Props {
   selectedId: number | null;
@@ -18,6 +25,7 @@ interface Props {
  */
 export function EventList({ selectedId, onSelect, refreshToken }: Props) {
   const [events, setEvents] = useState<HearsayEvent[]>([]);
+  const [sizes, setSizes] = useState<Map<number, number>>(new Map());
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -28,6 +36,12 @@ export function EventList({ selectedId, onSelect, refreshToken }: Props) {
       const loaded = await invoke<HearsayEvent[]>("list_events");
       setEvents(loaded);
       setError(null);
+
+      // Separately, and never fatally: this stats a file per recording, and a slow or
+      // unreadable disk should cost the sizes, not the list.
+      void invoke<AudioUsage[]>("audio_usage")
+        .then((usage) => setSizes(new Map(usage.map((row) => [row.event_id, row.bytes]))))
+        .catch(() => setSizes(new Map()));
       // Open on the newest recording rather than an empty pane. That is almost always
       // the one being looked for, and "Nothing selected" is a wasted first screen.
       setSelectedOnce((already) => {
@@ -99,6 +113,7 @@ export function EventList({ selectedId, onSelect, refreshToken }: Props) {
               <EventCard
                 key={event.id}
                 event={event}
+                bytes={sizes.get(event.id) ?? null}
                 selected={event.id === selectedId}
                 onSelect={() => onSelect(event.id)}
               />
@@ -110,12 +125,21 @@ export function EventList({ selectedId, onSelect, refreshToken }: Props) {
   );
 }
 
+/**
+ * One recording in the list.
+ *
+ * The size is here rather than only in the detail pane because choosing what to delete is
+ * a comparison: a 667 MB recording and a 30 MB one are not the same decision, and opening
+ * each in turn to find out which is which is not a comparison anyone will make.
+ */
 function EventCard({
   event,
+  bytes,
   selected,
   onSelect,
 }: {
   event: HearsayEvent;
+  bytes: number | null;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -138,6 +162,19 @@ function EventCard({
         <span>{formatDuration(duration)}</span>
         <span aria-hidden>·</span>
         <span>{formatMode(event.mode)}</span>
+        {bytes !== null ? (
+          <>
+            <span aria-hidden>·</span>
+            <span className="mono">{formatBytes(bytes)}</span>
+          </>
+        ) : event.audio_deleted_at ? (
+          // Said rather than left blank. A row with no size beside one showing 667 MB
+          // would otherwise read as a recording whose size had not loaded yet.
+          <>
+            <span aria-hidden>·</span>
+            <span>Audio deleted</span>
+          </>
+        ) : null}
       </span>
     </button>
   );
