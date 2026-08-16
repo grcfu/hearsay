@@ -16,8 +16,9 @@ use hearsay_audio::Mode;
 use hearsay_core::db::NewSegment;
 use hearsay_core::transcribe::{transcribe_recording, TranscribeEvent, DEFAULT_MODEL};
 use hearsay_core::Database;
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 
 /// A ticket queue: threads are served in the order they arrive.
@@ -79,6 +80,51 @@ impl Drop for Turn {
     }
 }
 
+/// Recordings with a transcription pass queued or running.
+///
+/// The ticket queue above orders passes but does not say whose they are, and something
+/// has to: a pass reads the WAV from beginning to end, so deleting that file while it is
+/// in flight turns a working transcription into an `unreadable_audio` failure partway
+/// through. Refusing up front explains the situation; letting it race produces a
+/// half-finished pass and an error about a file the user just asked to remove.
+fn in_flight() -> &'static Mutex<HashSet<i64>> {
+    static IN_FLIGHT: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// A poisoned lock here guards a set of ids, not data that can be left half-written, so
+/// recovering is safe and better than wedging every later check for the session.
+fn in_flight_set() -> MutexGuard<'static, HashSet<i64>> {
+    in_flight()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Whether a transcription pass for this recording is queued or running.
+pub fn is_transcribing(event_id: i64) -> bool {
+    in_flight_set().contains(&event_id)
+}
+
+/// Marks a recording as having a pass in flight, clearing it on drop.
+///
+/// Dropped rather than cleared by hand so a failing or panicking pass cannot leave a
+/// recording marked busy for the rest of the session — which would make its audio
+/// undeletable with no way to explain why.
+struct InFlight(i64);
+
+impl InFlight {
+    fn mark(event_id: i64) -> Self {
+        in_flight_set().insert(event_id);
+        Self(event_id)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        in_flight_set().remove(&self.0);
+    }
+}
+
 /// Starts transcription on a worker thread, queued behind any pass already running.
 pub fn spawn_transcription(
     app: AppHandle,
@@ -87,9 +133,15 @@ pub fn spawn_transcription(
     audio_path: PathBuf,
     mode: Mode,
 ) {
+    // Marked here rather than inside the thread: `retranscribe` returning has to mean the
+    // pass is already accounted for, or a delete arriving immediately after would slip
+    // through the gap before the worker started.
+    let busy = InFlight::mark(event_id);
+
     std::thread::Builder::new()
         .name(format!("hearsay-transcribe-{event_id}"))
         .spawn(move || {
+            let _busy = busy;
             let (ticket, ahead) = QUEUE.join();
             if ahead > 0 {
                 // Say so, or the pane sits blank and the transcription looks lost.
@@ -323,6 +375,48 @@ mod tests {
         assert!(
             done_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
             "the queue never recovered from a panicking pass"
+        );
+    }
+
+    // ---- knowing which recordings have a pass in flight ----
+
+    #[test]
+    fn a_recording_is_busy_only_while_its_pass_is_in_flight() {
+        let _exclusive = exclusive();
+
+        assert!(!is_transcribing(4_101), "nothing should be busy to begin with");
+        {
+            let _busy = InFlight::mark(4_101);
+            assert!(is_transcribing(4_101));
+            assert!(
+                !is_transcribing(4_102),
+                "one recording being busy must not implicate another"
+            );
+        }
+        assert!(
+            !is_transcribing(4_101),
+            "the mark must clear when the pass finishes"
+        );
+    }
+
+    /// The reason this is a drop guard. A pass that falls over must not leave its
+    /// recording marked busy for the rest of the session — the audio would be
+    /// undeletable, with nothing to explain why.
+    #[test]
+    fn a_panicking_pass_stops_being_busy() {
+        let _exclusive = exclusive();
+
+        let panicked = std::thread::spawn(|| {
+            let _busy = InFlight::mark(4_103);
+            assert!(is_transcribing(4_103));
+            panic!("transcription fell over");
+        })
+        .join();
+        assert!(panicked.is_err(), "the test needs the pass to have panicked");
+
+        assert!(
+            !is_transcribing(4_103),
+            "a recording stayed busy after its pass died"
         );
     }
 }
