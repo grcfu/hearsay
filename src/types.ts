@@ -56,6 +56,20 @@ export interface HearsayEvent {
   /** When a transcription pass last finished. Null means one never has — which is not the
    *  same as the recording having nothing to say. */
   transcribed_at: string | null;
+  /** When the audio was deleted on purpose, the transcript being kept. Null covers both
+   *  "still there" and "there never was any"; `audio_path` tells those two apart. */
+  audio_deleted_at: string | null;
+}
+
+/** What one recording's audio occupies on disk right now. */
+export interface AudioUsage {
+  event_id: number;
+  bytes: number;
+}
+
+/** How much disk deleting a recording's audio gave back. */
+export interface ReclaimedAudio {
+  bytes: number;
 }
 
 export interface Segment {
