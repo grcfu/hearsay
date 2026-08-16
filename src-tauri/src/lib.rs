@@ -72,6 +72,7 @@ pub fn run() {
             commands::events::search_transcripts,
             commands::events::delete_event,
             commands::events::delete_audio,
+            commands::events::audio_usage,
             commands::export::export_file_name,
             commands::export::export_audio,
             commands::settings::settings,

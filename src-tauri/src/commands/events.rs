@@ -94,6 +94,34 @@ pub fn delete_event(state: State<'_, AppState>, event_id: i64) -> CommandResult<
     }
 }
 
+/// What one recording's audio occupies right now.
+#[derive(Debug, Serialize)]
+pub struct AudioUsage {
+    pub event_id: i64,
+    pub bytes: u64,
+}
+
+/// How much disk each recording's audio is using.
+///
+/// Separate from `list_events` because it stats a file per recording, and the list is
+/// reloaded on every change — a rename should not go and touch the disk. Recordings whose
+/// audio is gone, deleted or never written, are left out rather than reported as zero:
+/// nothing there is different from nothing to reclaim.
+#[tauri::command]
+pub fn audio_usage(state: State<'_, AppState>) -> CommandResult<Vec<AudioUsage>> {
+    Ok(state
+        .db
+        .events()?
+        .into_iter()
+        .filter_map(|event| {
+            storage::audio_bytes(event.audio_path.as_deref()).map(|bytes| AudioUsage {
+                event_id: event.id,
+                bytes,
+            })
+        })
+        .collect())
+}
+
 /// How much disk a deletion gave back.
 #[derive(Debug, Serialize)]
 pub struct ReclaimedAudio {
