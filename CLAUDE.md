@@ -203,7 +203,8 @@ click-to-seek work.
 
 ```sql
 events(id, title, ai_title, calendar_event_id, started_at, ended_at,
-       mode, audio_path, summary_md, model_used, created_at, transcribed_at)
+       mode, audio_path, summary_md, model_used, created_at, transcribed_at,
+       audio_deleted_at)
 
 segments(id, event_id, channel, start_ms, end_ms, text)   -- channel is 'mic' or 'system'
 
@@ -329,6 +330,54 @@ a save sheet. Local only — this is a file copy, not a share, and no network is
   to mark what was missing.
 - Hearsay never picks the destination itself. There is no "Exports" folder, no default
   drop into `~/Downloads`; the audio leaves the app only where the user pointed it.
+
+---
+
+## 8d. Deleting the audio, keeping the transcript
+
+Audio is the only thing Hearsay writes that grows without bound: 16-bit PCM at the rate
+the devices negotiated, which is about **700 MB an hour in `conversation` and half that
+in `listen_only`**. Everything else is text and rounds to nothing beside it. The Audio tab
+has **Delete the audio**, which removes the file and keeps everything written from it.
+
+This works because §8 already holds: **segments are the source of truth**. The transcript,
+the summary, the FTS index and the stored questions are all rows, none of them read from
+the file, so all of them survive it. **Ask keeps working** — it reads `segments`, never the
+WAV.
+
+- **Always a deliberate, per-recording press.** No timer, no age policy, no background
+  sweep, no "delete audio older than 30 days". Hearsay does not destroy a user's data on a
+  schedule, and this is the one feature where it would be most tempting.
+- **`audio_deleted_at` is its own column**, not an inference from `audio_path IS NULL`.
+  Absence cannot say why. A recording whose file never arrived and one whose audio was
+  thrown away on purpose must not look identical, because the consequences of the second
+  have to read as a decision rather than as a fault. Same reasoning as `transcribed_at`.
+- **`audio_path` is cleared in the same statement.** A dangling path would have the webview
+  build an `<audio>` source that never loads, and `untranscribed_events` — which keys on
+  `audio_path IS NOT NULL` — would offer the recording for transcription on every launch
+  forever, against a file that is deliberately gone.
+- **Three refusals, all because the audio cannot be rebuilt from anything else.** A live
+  recording's file is still being written; a recording with a transcription pass in flight
+  is being read right now and would fail partway; and **a recording that has never been
+  transcribed is refused outright**, because deleting its audio leaves an empty row rather
+  than a saving. Passes in flight are tracked by id — the ticket queue orders them but does
+  not say whose they are.
+- **The file goes before the row is marked.** Marking first and then failing to remove it
+  would orphan the audio: still on disk, still taking the space, with nothing left pointing
+  at it to try again.
+- **Seek stops being offered, rather than silently doing nothing.** Transcript lines and
+  the `[MM:SS]` citations in an answer become plain text — not disabled buttons, which dim
+  their text and cannot be selected, and this is a transcript. A control that looks live
+  and does nothing when pressed is the same class of failure as a dead tap.
+- **Re-transcribing is gone for good**, and both it and Save a copy say *deleted* rather
+  than *missing*. The transcript on disk is now the only one this recording will ever have.
+- **The list shows what each recording weighs**, because choosing what to delete is a
+  comparison and nobody makes one by opening every recording in turn.
+
+Compressing instead of deleting was considered and is not available. The transcription
+sidecar reads audio through `soundfile`/libsndfile, which does not decode AAC, so
+converting recordings to the `.m4a` that §8c exports would break re-transcription in
+exactly the way deleting does — while only recovering some of the space.
 
 ---
 
