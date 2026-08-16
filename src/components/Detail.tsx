@@ -503,6 +503,30 @@ function AudioTab({
   const [retranscribing, setRetranscribing] = useState(false);
   const [duration, setDuration] = useState<number | null>(null);
 
+  // Deliberately deleted, which is not the same as never having had a file. Saying which
+  // is what makes the inert seek buttons elsewhere read as a consequence of a decision
+  // rather than as something broken.
+  if (event.audio_deleted_at) {
+    return (
+      <div className="panel">
+        <p style={{ marginTop: 0 }}>
+          The audio was deleted on{" "}
+          {new Date(event.audio_deleted_at).toLocaleDateString(undefined, {
+            month: "long",
+            day: "numeric",
+            year: "numeric",
+          })}
+          .
+        </p>
+        <p className="small muted">
+          Its transcript, summary and questions are all still here, and still searchable —
+          none of them were read from the file. What is gone is playing it back, jumping to
+          a timestamp, saving a copy, and transcribing it again.
+        </p>
+      </div>
+    );
+  }
+
   if (!src) {
     return <p className="muted">This recording has no audio file.</p>;
   }
