@@ -137,6 +137,35 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE events ADD COLUMN audio_deleted_at TEXT;
     "#,
+    // 7: stretches of a recording during which a channel was not being captured.
+    //
+    // A recording's mode can change while it runs, and the moment it does the transcript
+    // stops being uniform: part of it has a microphone channel and part of it does not.
+    // `events.mode` describes the file, which is one value, so it cannot say when.
+    //
+    // Not folded into `mute_spans`, for the reason `audio_deleted_at` is not folded into
+    // `audio_path IS NULL`: the zeros look identical and the causes are not. A muted span
+    // is a microphone that was open and deliberately silenced. `no_microphone` is a
+    // microphone that was never open at all, which is a stronger statement — nothing the
+    // room said could have reached disk. Reading the second as the first would have the
+    // transcript claim the user chose to go quiet when in fact they were not being
+    // recorded.
+    //
+    // `system_audio_gap` is the cost of opening a microphone partway through: the tap's
+    // aggregate device has to be destroyed first, and for the sub-second that takes there
+    // is no system audio. The file carries silence there so its timeline still matches
+    // the clock, and this is what says the silence was a switch rather than a quiet room.
+    r#"
+    CREATE TABLE capture_spans (
+        id        INTEGER PRIMARY KEY,
+        event_id  INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+        kind      TEXT    NOT NULL CHECK (kind IN ('no_microphone', 'system_audio_gap')),
+        start_ms  INTEGER NOT NULL,
+        end_ms    INTEGER NOT NULL
+    );
+
+    CREATE INDEX idx_capture_spans_event ON capture_spans(event_id, start_ms);
+    "#,
 ];
 
 /// A recording session and everything known about it.
@@ -255,6 +284,38 @@ impl MuteSpan {
         Ok(Self {
             id: row.get("id")?,
             event_id: row.get("event_id")?,
+            start_ms: row.get("start_ms")?,
+            end_ms: row.get("end_ms")?,
+        })
+    }
+}
+
+/// What a [`CaptureSpan`] is a stretch of.
+pub const NO_MICROPHONE: &str = "no_microphone";
+/// See [`NO_MICROPHONE`].
+pub const SYSTEM_AUDIO_GAP: &str = "system_audio_gap";
+
+/// A stretch during which one of a recording's channels was not being captured.
+///
+/// Written only when the recording's mode changed while it ran. A recording that stayed
+/// in one mode says which in `events.mode`, and marking the whole of a listen-only
+/// transcript as having no microphone would tell a reader nothing they cannot already see.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureSpan {
+    pub id: i64,
+    pub event_id: i64,
+    /// [`NO_MICROPHONE`] or [`SYSTEM_AUDIO_GAP`].
+    pub kind: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+impl CaptureSpan {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            event_id: row.get("event_id")?,
+            kind: row.get("kind")?,
             start_ms: row.get("start_ms")?,
             end_ms: row.get("end_ms")?,
         })
@@ -642,6 +703,62 @@ impl Database {
                 }
             }
             transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Replaces the stretches during which a channel was not being captured.
+    ///
+    /// Written in one transaction with the mute spans' shape, so a recording whose mode
+    /// changed twice cannot end up with half its markers.
+    pub fn replace_capture_spans(
+        &self,
+        event_id: i64,
+        spans: &[(&str, i64, i64)],
+    ) -> Result<()> {
+        self.with_connection(|connection| {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute(
+                "DELETE FROM capture_spans WHERE event_id = ?1",
+                params![event_id],
+            )?;
+            {
+                let mut statement = transaction.prepare(
+                    "INSERT INTO capture_spans (event_id, kind, start_ms, end_ms)
+                     VALUES (?1, ?2, ?3, ?4)",
+                )?;
+                for (kind, start_ms, end_ms) in spans {
+                    statement.execute(params![event_id, kind, start_ms, end_ms])?;
+                }
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn capture_spans(&self, event_id: i64) -> Result<Vec<CaptureSpan>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT * FROM capture_spans WHERE event_id = ?1 ORDER BY start_ms")?;
+            let spans = statement
+                .query_map(params![event_id], CaptureSpan::from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(spans)
+        })
+    }
+
+    /// Records what the recording's file turned out to be, which a mode switch changes.
+    ///
+    /// Set from the finished file rather than from what was asked for at the start. It
+    /// decides how many channels transcription reads, so a stereo file recorded as
+    /// `listen_only` would be read as one mono channel — the silent left one, and none of
+    /// the meeting.
+    pub fn set_mode(&self, event_id: i64, mode: &str) -> Result<()> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE events SET mode = ?1 WHERE id = ?2",
+                params![mode, event_id],
+            )?;
             Ok(())
         })
     }
@@ -1346,6 +1463,79 @@ mod tests {
 
         db.set_preference("speaker_name", "").expect("clear");
         assert_eq!(db.preference("speaker_name").expect("read"), None);
+    }
+
+    #[test]
+    fn capture_spans_round_trip() {
+        let (db, id) = seeded();
+        db.replace_capture_spans(
+            id,
+            &[
+                (NO_MICROPHONE, 0, 720_000),
+                (SYSTEM_AUDIO_GAP, 720_000, 720_600),
+            ],
+        )
+        .expect("capture spans insert");
+
+        let spans = db.capture_spans(id).expect("spans load");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].kind, NO_MICROPHONE);
+        assert_eq!(spans[0].end_ms, 720_000);
+        assert_eq!(spans[1].kind, SYSTEM_AUDIO_GAP);
+    }
+
+    /// Two switches in one recording produce two `no_microphone` stretches, and both have
+    /// to survive: a transcript that marks the first and drops the second reads as though
+    /// the microphone stayed open to the end.
+    #[test]
+    fn every_stretch_without_a_microphone_survives() {
+        let (db, id) = seeded();
+        db.replace_capture_spans(
+            id,
+            &[(NO_MICROPHONE, 0, 60_000), (NO_MICROPHONE, 300_000, 900_000)],
+        )
+        .expect("capture spans insert");
+
+        let spans = db.capture_spans(id).expect("spans load");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].start_ms, 0);
+        assert_eq!(spans[1].start_ms, 300_000);
+    }
+
+    #[test]
+    fn a_kind_the_schema_does_not_know_is_refused() {
+        let (db, id) = seeded();
+        assert!(
+            db.replace_capture_spans(id, &[("dozed_off", 0, 10)]).is_err(),
+            "the schema must not accept a span nothing can render"
+        );
+    }
+
+    #[test]
+    fn deleting_an_event_takes_its_capture_spans_with_it() {
+        let (db, id) = seeded();
+        db.replace_capture_spans(id, &[(NO_MICROPHONE, 0, 500)])
+            .expect("capture spans insert");
+
+        db.delete_event(id).expect("delete works");
+        assert!(db.capture_spans(id).expect("query works").is_empty());
+    }
+
+    /// The mode is written from the finished file, because a recording that gained a
+    /// microphone partway through is stereo whatever it was started as.
+    #[test]
+    fn the_mode_can_be_corrected_after_a_switch() {
+        let db = Database::open_in_memory().expect("in-memory database opens");
+        let id = db
+            .create_event("Info session", "listen_only", Utc::now(), None, None)
+            .expect("event is created");
+        assert_eq!(db.event(id).expect("read").expect("exists").mode, "listen_only");
+
+        db.set_mode(id, "conversation").expect("mode updates");
+        assert_eq!(
+            db.event(id).expect("read").expect("exists").mode,
+            "conversation"
+        );
     }
 
     #[test]

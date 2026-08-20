@@ -14,7 +14,7 @@ pub mod storage;
 pub mod summary;
 pub mod transcribe;
 
-pub use db::{ChatMessage, Database, Event, MuteSpan, NewSegment, Segment};
+pub use db::{CaptureSpan, ChatMessage, Database, Event, MuteSpan, NewSegment, Segment};
 pub use summary::Summary;
 pub use hearsay_audio::Mode;
 pub use transcribe::{transcribe_recording, Channel, TranscriptSegment, TranscriptionResult};
