@@ -296,11 +296,36 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     }
   };
 
+  /**
+   * Matches the finished recording to the meeting it overlaps, and takes its title.
+   *
+   * Done here rather than at start because §11 matches by *greatest time overlap*,
+   * requiring at least a quarter of the recording's duration — which only means anything
+   * once the recording has a duration. Doing it before `onRecorded` so the list refresh
+   * shows the meeting's name rather than the timestamp it was created with.
+   *
+   * A failure is logged and dropped. The calendar is optional and off until connected, so
+   * for anyone who has never connected one this call cannot succeed and its failure is
+   * not news. The recording itself is already safe on disk either way — nothing here is
+   * load-bearing, it only improves the name.
+   */
+  const linkToCalendar = async (eventId: number) => {
+    try {
+      const title = await invoke<string | null>("link_to_calendar", { eventId });
+      if (title) {
+        console.info(`linked recording ${eventId} to “${title}”`);
+      }
+    } catch (problem) {
+      console.warn("could not match the recording to a calendar event", problem);
+    }
+  };
+
   const stop = async () => {
     setBusy(true);
     setError(null);
     try {
       const event = await invoke<HearsayEvent>("stop_recording");
+      await linkToCalendar(event.id);
       onRecorded(event.id);
       await poll();
     } catch (problem) {
