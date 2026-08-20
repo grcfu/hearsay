@@ -148,6 +148,61 @@ Opens both and writes **one stereo WAV**:
 **Never mix to mono.** The channel split gives speaker attribution for free (left is the user, right
 is everyone else) and guarantees sample alignment with no drift.
 
+### Switching mode mid-recording
+
+Both directions, on a deliberate press, from the same toggle. The info session that turns
+into a conversation is a real thing that happens, and the alternative was stopping and
+starting a second recording of the same meeting.
+
+Nothing about §4's guarantee is weakened. **The microphone still only ever opens because
+somebody pressed Conversation** — never on a timer, never on a calendar event, never
+because a previous session was in that mode. A switch *down* closes the input device
+outright rather than muting it, which is a stronger promise than §5 can make: mute keeps
+the device open and writes zeros, this releases it.
+
+**Going up costs a sub-second gap in the system channel, and there is no version of it
+that does not.** §3's helper wraps its tap in an aggregate device, and while one exists,
+opening an input device takes over four minutes against under 200 ms before it — which is
+why `Recording::start` opens the microphone first. There is no way to add one later without
+taking the aggregate device down. So the tap is stopped, the microphone opened, and the tap
+started again.
+
+- **The gap is padded into the file as true silence and written down as a span.** Unpadded,
+  everything captured after the switch would land where the gap belongs and every later
+  timestamp would sit early by its length.
+- **The file is restrided, not replaced.** A WAV states its channel count before any audio
+  exists, so `wav::promote_to_stereo` rewrites the frames already written with the
+  recording moved to the right channel and the left silent. One file, one `audio_path`;
+  export, seek, and re-transcription keep working. It goes to a temporary beside the
+  original and is renamed over it, so an interruption leaves a playable recording. Refused
+  past the 32-bit size fields — around six hours at 48 kHz — rather than truncated.
+- **Nothing may be left buffered across the boundary.** The mixer is drained before it
+  widens; a backlog on either side at that moment would offset the two channels for the
+  rest of the recording and take the speaker attribution with it.
+- **Neither device failing loses the recording.** No microphone: the tap goes back and the
+  session stays in listen-only, which is what the user still believes it is. No tap: the
+  session carries on with the microphone and says so, loudly, while the meeting is still
+  happening.
+- **The file decides how a recording is transcribed**, not the mode the session ended in. A
+  recording that gained a microphone and then closed it again ends in listen-only with a
+  stereo file, and reading that as one mono channel would take the silent left channel for
+  the whole meeting. `events.mode` is corrected the moment the switch happens, and recovery
+  takes it from the file — which cannot be wrong about its own shape.
+- **The scrub keeps working after the microphone closes.** Up to a minute of microphone
+  audio is still held back at that point, and that is exactly the audio someone closing
+  their microphone is most likely to want gone. So it is gated on the file having a mic
+  channel, and the commit delay deliberately stays where it is rather than dropping to zero
+  and flushing all of it to disk.
+
+Compressing the file instead of restriding it, or writing a second file alongside, were
+both considered. A second file breaks `audio_path`, `wav::extract`, seek, and the one-pass
+transcription model for the sake of avoiding a rewrite that takes seconds.
+
+**A recording that switched carries its own markers** — `no_microphone` and
+`system_audio_gap` in `capture_spans` (§8). A recording that stayed in one mode gets none:
+`events.mode` already says which, and marking the whole of a listen-only transcript as
+having no microphone tells the reader nothing they cannot see.
+
 ---
 
 ## 5. Mute
@@ -210,6 +265,9 @@ segments(id, event_id, channel, start_ms, end_ms, text)   -- channel is 'mic' or
 
 mute_spans(id, event_id, start_ms, end_ms)
 
+capture_spans(id, event_id, kind, start_ms, end_ms)       -- kind is 'no_microphone' or
+                                                          -- 'system_audio_gap'
+
 chat_messages(id, event_id, role, content, created_at)    -- role is 'user' or 'assistant'
 ```
 
@@ -218,6 +276,14 @@ FTS5 over `segments.text`.
 `transcribed_at` records that a pass *finished*, not that it found anything. Segment count
 cannot stand in for it: a recording of a silent room has none either way, and treating
 that as "never transcribed" would re-transcribe it on every launch forever.
+
+`capture_spans` is its own table rather than a `kind` on `mute_spans`, for the reason
+`audio_deleted_at` is not an inference from `audio_path IS NULL`. The zeros look
+identical and the causes are not. A muted span is a microphone that was open and
+deliberately silenced; `no_microphone` is one that was never open, so nothing said in the
+room *could* have reached disk. Reading the second as the first has the transcript claim
+the user chose to go quiet when in fact they were not being recorded — an assertion about
+somebody's behaviour, made from a gap. Written only when the mode changed (§4).
 
 ### Interrupted recordings
 
@@ -259,7 +325,9 @@ The prompt lives in `crates/hearsay-core/src/summary.rs` as one editable string.
 - **Action items are a separate schema field**, never a heading the model writes. Owner is
   an enum — `you` / `them` / `unassigned`. Never a guessed name.
 - **Nothing invented.** Undecided stays undecided; garbled stays out. A `[mic muted]` span
-  is passed to the model and explicitly not to be speculated about.
+  is passed to the model and explicitly not to be speculated about, and so are the two
+  spans a mode switch leaves: `[no microphone]`, which the model is told not to read as
+  the recorder staying quiet, and `[system audio not captured]`.
 
 The recorder is addressed **by name**, set in Settings and stored in `preferences`
 (a preference, not a secret — it is written into every prompt, so it does not belong in
@@ -288,7 +356,9 @@ summary prompt. Its rules:
 - **Timestamps are cited as `[MM:SS]`** and rendered as buttons that seek the audio, so an
   answer can be checked rather than trusted.
 - **A `[mic muted]` span is never speculated about.** If the answer might lie inside one,
-  the answer is that it might lie inside one.
+  the answer is that it might lie inside one. The same holds for the two spans a mode
+  switch leaves (§4): inside a `[no microphone]` stretch the recorder may have been
+  speaking and none of it was kept.
 - **Garbled transcription is reported, not silently corrected.**
 
 Free text, not a schema: an answer is prose, and there is no structure to enforce.
@@ -337,7 +407,8 @@ a save sheet. Local only — this is a file copy, not a share, and no network is
 
 Audio is the only thing Hearsay writes that grows without bound: 16-bit PCM at the rate
 the devices negotiated, which is about **700 MB an hour in `conversation` and half that
-in `listen_only`**. Everything else is text and rounds to nothing beside it. The Audio tab
+in `listen_only`** — a recording switched mid-session (§4) is restrided, so it weighs the
+`conversation` rate for its whole length, not just from the switch. Everything else is text and rounds to nothing beside it. The Audio tab
 has **Delete the audio**, which removes the file and keeps everything written from it.
 
 This works because §8 already holds: **segments are the source of truth**. The transcript,
