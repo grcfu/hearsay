@@ -103,6 +103,72 @@ pub fn start_recording(
         })
 }
 
+/// Changes the mode of the recording that is already running.
+///
+/// Going to `conversation` opens a microphone that was never open, which costs a
+/// sub-second gap in the system channel — the tap's aggregate device has to be destroyed
+/// before an input device will open promptly. Going the other way closes the microphone
+/// outright rather than muting it, so §4's guarantee holds for the rest of the session.
+///
+/// `events.mode` is corrected here rather than at stop, because it decides how many
+/// channels transcription reads and the recording could end in a way that never reaches
+/// [`stop_recording`] — a crash, a lid closing. Recovery would then find a stereo file
+/// still marked `listen_only` and transcribe the silent left channel as the whole meeting.
+#[tauri::command]
+pub fn switch_mode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: String,
+) -> CommandResult<LiveStatus> {
+    let wanted = parse_mode(&mode)?;
+
+    let mut active = state.lock_recording()?;
+    let session = active.as_mut().ok_or_else(|| CommandError {
+        message: "nothing is recording, so there is no mode to change".to_string(),
+    })?;
+
+    let event_id = session.event_id;
+    let settled = session.recording.set_mode(wanted)?;
+    let has_mic_channel = session.recording.has_mic_channel();
+    let status = session.recording.status();
+    drop(active);
+
+    // The file is stereo from the first switch onwards and cannot be narrowed again, so
+    // this only ever moves one way.
+    if has_mic_channel {
+        state.db.set_mode(event_id, Mode::Conversation.as_str())?;
+    }
+
+    crate::tray::refresh(&app);
+    let _ = app.emit(
+        "recording-mode",
+        serde_json::json!({
+            "event_id": event_id,
+            "mode": settled.as_str(),
+        }),
+    );
+
+    if status.system_audio_lost {
+        // The microphone is recording and the other half of the meeting is not. Said out
+        // loud, now, while there is still something the user can do about it.
+        tracing::error!(
+            "recording {event_id} lost system audio when the mode was switched; only the \
+             microphone is being recorded"
+        );
+        let _ = app.emit(
+            "recording-system-audio-lost",
+            serde_json::json!({ "event_id": event_id }),
+        );
+    }
+
+    Ok(LiveStatus {
+        recording: true,
+        event_id: Some(event_id),
+        mode: Some(settled.as_str().to_string()),
+        status,
+    })
+}
+
 #[tauri::command]
 pub fn recording_status(state: State<'_, AppState>) -> CommandResult<LiveStatus> {
     let active = state.lock_recording()?;
@@ -137,10 +203,15 @@ pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> CommandResu
     };
 
     let event_id = session.event_id;
-    let mode = session.recording.mode();
     let outcome = session.recording.stop()?;
+    // What the *file* is, not what the session ended as. A recording that gained a
+    // microphone and then closed it again ends in listen-only with a stereo file, and
+    // transcribing that as one mono channel would read the silent left channel as the
+    // whole meeting.
+    let mode = outcome.layout_mode();
 
     state.db.finish_event(event_id, Utc::now())?;
+    state.db.set_mode(event_id, mode.as_str())?;
 
     // Every muted stretch is persisted so the transcript can say so out loud. A silent
     // gap with no marker would read as "nobody spoke".
@@ -149,6 +220,28 @@ pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> CommandResu
         tracing::info!(
             "recording {event_id} had {} muted span(s)",
             outcome.mute_spans.len()
+        );
+    }
+
+    // The stretches with no microphone at all, and the sub-second gaps in system audio
+    // that opening one costs. Both are only ever present when the mode changed mid
+    // recording, and both are missing speech that the file cannot account for on its own.
+    let capture_spans: Vec<(&str, i64, i64)> = outcome
+        .no_microphone_spans
+        .iter()
+        .map(|(start, end)| (hearsay_core::db::NO_MICROPHONE, *start, *end))
+        .chain(
+            outcome
+                .system_gaps
+                .iter()
+                .map(|(start, end)| (hearsay_core::db::SYSTEM_AUDIO_GAP, *start, *end)),
+        )
+        .collect();
+    if !capture_spans.is_empty() {
+        state.db.replace_capture_spans(event_id, &capture_spans)?;
+        tracing::info!(
+            "recording {event_id} changed mode; {} stretch(es) had a channel missing",
+            capture_spans.len()
         );
     }
     crate::tray::refresh(&app);

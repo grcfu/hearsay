@@ -65,6 +65,7 @@ pub fn run() {
             commands::recording::start_recording,
             commands::recording::stop_recording,
             commands::recording::recording_status,
+            commands::recording::switch_mode,
             commands::transcription::retranscribe,
             commands::events::list_events,
             commands::events::event_detail,

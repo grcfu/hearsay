@@ -62,6 +62,29 @@ fn finish_interrupted(db: &Arc<Database>) -> Result<()> {
                         event.id,
                         repaired.duration_ms()
                     );
+
+                    // Take the mode from the file rather than trusting the row. A
+                    // recording that gained a microphone while it ran has a stereo file
+                    // from that point on, and the switch writes the row immediately — but
+                    // if the process died between the two, the row still says
+                    // `listen_only` and transcription would read the silent left channel
+                    // as the whole meeting. The file cannot be wrong about its own shape.
+                    let from_file = if repaired.format.channels >= 2 {
+                        Mode::Conversation
+                    } else {
+                        Mode::ListenOnly
+                    };
+                    if event.mode != from_file.as_str() && repaired.frames > 0 {
+                        tracing::warn!(
+                            "recording {} is stored as {} and its audio is {}; taking the \
+                             file's word for it",
+                            event.id,
+                            event.mode,
+                            from_file.as_str()
+                        );
+                        db.set_mode(event.id, from_file.as_str())?;
+                    }
+
                     event.started_at
                         + TimeDelta::try_milliseconds(repaired.duration_ms() as i64)
                             .unwrap_or_default()
@@ -170,11 +193,16 @@ mod tests {
     /// Half a second of stereo audio, left abandoned exactly as a killed process would:
     /// samples flushed, header never brought up to date.
     fn abandoned_recording(path: &Path, sample_rate: u32, seconds: u32) {
-        let format = AudioFormat::new(sample_rate, 2);
+        abandoned_recording_with(path, sample_rate, seconds, 2);
+    }
+
+    /// As above, at a given channel count — which is what recovery reads the mode from.
+    fn abandoned_recording_with(path: &Path, sample_rate: u32, seconds: u32, channels: u16) {
+        let format = AudioFormat::new(sample_rate, channels);
         let mut writer = WavWriter::create(path, format).expect("writer is created");
         let frames = (sample_rate * seconds) as usize;
         writer
-            .write_samples(&vec![0.25f32; frames * 2])
+            .write_samples(&vec![0.25f32; frames * channels as usize])
             .expect("samples write");
         std::mem::forget(writer);
     }
@@ -260,6 +288,92 @@ mod tests {
             "a recording that captured nothing should read as zero length"
         );
         assert!(db.unfinished_events().expect("query works").is_empty());
+    }
+
+    /// The hole this closes: switching to conversation mid-recording restrides the file
+    /// and then writes the row, and a process that dies between the two leaves a stereo
+    /// file stored as `listen_only`. Transcribed as mono, that reads the silent left
+    /// channel as the whole meeting.
+    #[test]
+    fn a_stereo_file_stored_as_listen_only_is_corrected_from_the_file() {
+        let path = temp_path("switched");
+        abandoned_recording(&path, 48_000, 2);
+
+        let db = Arc::new(hearsay_core::Database::open_in_memory().expect("database opens"));
+        let id = db
+            .create_event(
+                "Switched partway",
+                "listen_only",
+                Utc::now(),
+                Some(&path.to_string_lossy()),
+                None,
+            )
+            .expect("event is created");
+
+        finish_interrupted(&db).expect("recovery runs");
+
+        let event = db.event(id).expect("query works").expect("event exists");
+        assert_eq!(
+            event.mode, "conversation",
+            "the file has two channels, so the recording has a microphone in it"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The reverse direction, for a recording whose row is ahead of its file.
+    #[test]
+    fn a_mono_file_stored_as_conversation_is_corrected_too() {
+        let path = temp_path("mono-mode");
+        abandoned_recording_with(&path, 48_000, 1, 1);
+
+        let db = Arc::new(hearsay_core::Database::open_in_memory().expect("database opens"));
+        let id = db
+            .create_event(
+                "One channel",
+                "conversation",
+                Utc::now(),
+                Some(&path.to_string_lossy()),
+                None,
+            )
+            .expect("event is created");
+
+        finish_interrupted(&db).expect("recovery runs");
+
+        let event = db.event(id).expect("query works").expect("event exists");
+        assert_eq!(event.mode, "listen_only", "one channel means no microphone in it");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An empty file's channel count says nothing about what the session was, so it must
+    /// not overrule the row. Header-only files come from sessions that died at the start.
+    #[test]
+    fn an_empty_file_does_not_overrule_the_stored_mode() {
+        let path = temp_path("empty-mode");
+        abandoned_recording(&path, 48_000, 0);
+
+        let db = Arc::new(hearsay_core::Database::open_in_memory().expect("database opens"));
+        let id = db
+            .create_event(
+                "Nothing captured",
+                "listen_only",
+                Utc::now(),
+                Some(&path.to_string_lossy()),
+                None,
+            )
+            .expect("event is created");
+
+        finish_interrupted(&db).expect("recovery runs");
+
+        let event = db.event(id).expect("query works").expect("event exists");
+        assert_eq!(
+            event.mode, "listen_only",
+            "an empty stereo header must not turn a listen-only session into a \
+             conversation one"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Recovery must not touch a recording that ended cleanly.

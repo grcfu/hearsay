@@ -1,7 +1,7 @@
 //! Reading, renaming, searching, and deleting recordings.
 
 use crate::state::{AppState, CommandError, CommandResult};
-use hearsay_core::db::{Event, MuteSpan, SearchHit, Segment};
+use hearsay_core::db::{CaptureSpan, Event, MuteSpan, SearchHit, Segment};
 use hearsay_core::storage;
 use serde::Serialize;
 use tauri::State;
@@ -12,6 +12,9 @@ pub struct EventDetail {
     pub event: Event,
     pub segments: Vec<Segment>,
     pub mute_spans: Vec<MuteSpan>,
+    /// Stretches during which a channel was not being captured at all. Only present on a
+    /// recording whose mode changed while it ran.
+    pub capture_spans: Vec<CaptureSpan>,
 }
 
 #[tauri::command]
@@ -27,6 +30,7 @@ pub fn event_detail(state: State<'_, AppState>, event_id: i64) -> CommandResult<
     Ok(EventDetail {
         segments: state.db.segments(event_id)?,
         mute_spans: state.db.mute_spans(event_id)?,
+        capture_spans: state.db.capture_spans(event_id)?,
         event,
     })
 }
