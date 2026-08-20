@@ -315,7 +315,133 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
 
   // The title bar is transparent, so this bar doubles as the window's drag handle and
   // holds the space the traffic lights sit in.
+  /*
+   * What the app has to say right now, in the order it matters.
+   *
+   * Assembled as a list rather than written inline in the markup so the strip below the
+   * bar can be left out entirely when there is nothing to say — an empty strip would be
+   * a band of royal under the bar that means nothing.
+   *
+   * Alerts come first. The notes below them are things to know; an alert is a thing to
+   * act on, and burying one under three lines of advice about headphones would be the
+   * wrong way round.
+   */
+  const notices: React.ReactNode[] = [];
+
+  if (meeting && !recording) {
+    notices.push(
+      <div className="bar-prompt" key="meeting">
+        <span>“{meeting.title}” is starting.</span>
+        <button
+          type="button"
+          className="button primary small"
+          onClick={() => {
+            setMeeting(null);
+            void start();
+          }}
+        >
+          Record it
+        </button>
+        <button type="button" className="button small" onClick={() => setMeeting(null)}>
+          Not now
+        </button>
+      </div>,
+    );
+  }
+
+  if (recording && silentTooLong) {
+    notices.push(
+      <div className="bar-alert" key="silent">
+        <span>Nothing heard for a minute.</span>
+        <button type="button" className="button small" onClick={stop}>
+          End recording
+        </button>
+        <button
+          type="button"
+          className="button small"
+          onClick={() => setDismissedSilence(true)}
+        >
+          Keep going
+        </button>
+      </div>,
+    );
+  }
+
+  // A switch to conversation has to take the tap down to open the microphone. It almost
+  // always comes back; when it does not, the other half of the meeting is no longer being
+  // recorded, and that cannot wait until playback to be discovered. An alert rather than
+  // a note, because unlike the lines below this one is worth stopping for.
+  if (recording && live?.system_audio_lost) {
+    notices.push(
+      <div className="bar-alert" key="system-audio-lost">
+        <span>
+          System audio did not come back after the switch. Only your microphone is being
+          recorded.
+        </span>
+        <button type="button" className="button small" onClick={stop}>
+          Stop and restart
+        </button>
+      </div>,
+    );
+  }
+
+  if (error) {
+    notices.push(
+      <p className="bar-note" key="error">
+        {error}
+      </p>,
+    );
+  }
+
+  if (recording && scrubbed) {
+    notices.push(
+      <p className="bar-note" key="scrubbed">
+        {scrubbed}
+      </p>,
+    );
+  }
+
+  if (recording && mute.muted) {
+    notices.push(
+      <p className="bar-note" key="muted">
+        Your microphone is writing silence. The other side is still being recorded, and
+        the muted stretch is marked in the transcript.
+      </p>,
+    );
+  }
+
+  if (recording && live?.echo) {
+    notices.push(
+      <p className="bar-note" key="echo">
+        The other side is coming back through your microphone. Headphones would keep the
+        two voices apart in the transcript. Recording continues either way.
+      </p>,
+    );
+  }
+
+  if (recording && live && !live.has_audio) {
+    notices.push(
+      <p className="bar-note" key="no-audio">
+        No audio captured yet. If this stays empty, the recording will be silent.
+      </p>,
+    );
+  }
+
+  // Dropped audio leaves no marker in the transcript — unlike a muted span, there is
+  // nothing afterwards to say it happened. So it has to be said now, while the cause is
+  // still on the machine and can be closed.
+  if (recording && live?.losing_audio) {
+    notices.push(
+      <p className="bar-note" key="losing-audio">
+        Losing audio — {Math.round(live.dropped_ms / 1000)}s has been dropped because this
+        Mac cannot keep up. Quitting something heavy should stop it. The dropped stretches
+        will simply be missing.
+      </p>,
+    );
+  }
+
   return (
+    <>
     <header
       className={`topbar${showCaptions ? " with-captions" : ""}`}
       data-tauri-drag-region
@@ -358,70 +484,6 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
                 <span className="shortcut-hint">⌘⇧X</span>
               </button>
             ) : null}
-            {scrubbed ? (
-              <p className="small" style={{ opacity: 0.9, margin: "2px 6px 0" }}>
-                {scrubbed}
-              </p>
-            ) : null}
-            {mute.muted ? (
-              <p className="small" style={{ opacity: 0.8, margin: "2px 6px 0" }}>
-                Your microphone is writing silence. The other side is still being
-                recorded, and the muted stretch is marked in the transcript.
-              </p>
-            ) : null}
-            {silentTooLong ? (
-              <div className="bar-alert">
-                <span>Nothing heard for a minute.</span>
-                <button type="button" className="button small" onClick={stop}>
-                  End recording
-                </button>
-                <button
-                  type="button"
-                  className="button small"
-                  onClick={() => setDismissedSilence(true)}
-                >
-                  Keep going
-                </button>
-              </div>
-            ) : null}
-            {/* A switch to conversation has to take the tap down to open the microphone.
-                It almost always comes back; when it does not, the other half of the
-                meeting is no longer being recorded, and that cannot wait until playback
-                to be discovered. `bar-alert` rather than a quiet line, because unlike the
-                notes around it this one is worth stopping for. */}
-            {live?.system_audio_lost ? (
-              <div className="bar-alert">
-                <span>
-                  System audio did not come back after the switch. Only your microphone is
-                  being recorded.
-                </span>
-                <button type="button" className="button small" onClick={stop}>
-                  Stop and restart
-                </button>
-              </div>
-            ) : null}
-            {live?.echo ? (
-              <p className="small" style={{ opacity: 0.85, margin: "2px 6px 0" }}>
-                The other side is coming back through your microphone. Headphones would
-                keep the two voices apart in the transcript. Recording continues either
-                way.
-              </p>
-            ) : null}
-            {live && !live.has_audio ? (
-              <p className="small" style={{ opacity: 0.8, margin: "2px 6px 0" }}>
-                No audio captured yet. If this stays empty, the recording will be silent.
-              </p>
-            ) : null}
-            {/* Dropped audio leaves no marker in the transcript — unlike a muted span,
-                there is nothing afterwards to say it happened. So it has to be said now,
-                while the cause is still on the machine and can be closed. */}
-            {live?.losing_audio ? (
-              <p className="small" style={{ opacity: 0.9, margin: "2px 6px 0" }}>
-                Losing audio — {Math.round(live.dropped_ms / 1000)}s has been dropped
-                because this Mac cannot keep up. Quitting something heavy should stop it.
-                The dropped stretches will simply be missing.
-              </p>
-            ) : null}
           </>
         ) : (
           <button
@@ -434,33 +496,6 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
             Start recording
           </button>
         )}
-        {meeting && !recording ? (
-          <div className="bar-prompt">
-            <span>“{meeting.title}” is starting.</span>
-            <button
-              type="button"
-              className="button primary small"
-              onClick={() => {
-                setMeeting(null);
-                void start();
-              }}
-            >
-              Record it
-            </button>
-            <button
-              type="button"
-              className="button small"
-              onClick={() => setMeeting(null)}
-            >
-              Not now
-            </button>
-          </div>
-        ) : null}
-        {error ? (
-          <p className="small" style={{ margin: "4px 6px 0", opacity: 0.9 }}>
-            {error}
-          </p>
-        ) : null}
       </div>
 
       <div className="bar-group stack">
@@ -535,6 +570,24 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
         title="Drag to resize · double-click to reset"
       />
     </header>
+
+    {/*
+      * Everything the app has to *say*, in a strip of its own beneath the controls.
+      *
+      * These used to sit in the bar's first group alongside the record button. The group
+      * is `flex: none` and the text does not wrap, so a long meeting title or a status
+      * note simply widened it — and since the bar is `overflow: hidden`, whatever was to
+      * the right got clipped. The source picker lost its label and the nav icons
+      * disappeared altogether, which took Settings with them: the app was telling the
+      * user something and hiding its own controls to do it.
+      *
+      * Below the bar there is a whole row to use, so a long title wraps instead of
+      * pushing anything anywhere, and the controls above never move.
+      */}
+    {notices.length > 0 ? (
+      <div className="bar-notices">{notices}</div>
+    ) : null}
+    </>
   );
 }
 

@@ -147,11 +147,31 @@ select {
  * short controls and a great deal of nothing. Laid out horizontally they occupy one
  * line, and the recordings and the transcript get the whole window beneath.
  */
+/*
+ * Three rows: the control bar, anything the app has to say, then the panes.
+ *
+ * Each row is assigned explicitly rather than left to source order, so the panes stay in
+ * the last row whether or not there is anything to say. With implicit placement, a bar
+ * with no notices would put the panes in row two and the layout would shift under them
+ * every time a notice appeared or went away.
+ */
 .app {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   height: 100%;
   overflow: hidden;
+}
+
+.app > .topbar {
+  grid-row: 1;
+}
+
+.app > .bar-notices {
+  grid-row: 2;
+}
+
+.app > .panes {
+  grid-row: 3;
 }
 
 .panes {
@@ -261,33 +281,73 @@ select {
 }
 
 /*
- * Any .button placed in the bar.
+ * Any .button placed on royal — the bar itself, or the notices strip beneath it.
  *
  * .button is white with `color: inherit`, which is correct on the light panes and
- * invisible here — inside the royal bar `inherit` is white, so it rendered white text on
- * a white button. Everything in the bar sits on royal, so buttons here are outlined
- * rather than filled.
+ * invisible here — on royal `inherit` is white, so it rendered white text on a white
+ * button. Everything on this surface is outlined rather than filled.
+ *
+ * The strip is named alongside the bar rather than relying on descent from it: the
+ * calendar prompt and the recording alerts moved out of the bar into the strip, and
+ * scoping these to `.topbar` alone brought the white-on-white button straight back.
  */
-.topbar .button {
+.topbar .button,
+.bar-notices .button {
   background: transparent;
   color: var(--white);
   border-color: rgb(255 255 255 / 35%);
 }
 
-.topbar .button:hover:not(:disabled) {
+.topbar .button:hover:not(:disabled),
+.bar-notices .button:hover:not(:disabled) {
   border-color: var(--white);
   background: rgb(255 255 255 / 10%);
 }
 
 /* The primary action in a bar prompt stays filled, so the two are distinguishable. */
-.topbar .button.primary {
+.topbar .button.primary,
+.bar-notices .button.primary {
   background: var(--white);
   color: var(--royal);
   border-color: var(--white);
 }
 
-/* The calendar prompt and the silent-recording alert. Sit in the bar so they are
-   visible the moment the window is. */
+/*
+ * The strip under the control bar that holds everything the app has to say.
+ *
+ * These lived in the bar's first group, beside the record button. That group is
+ * `flex: none` and the text does not wrap, so a long meeting title or a status note
+ * widened it — and the bar being `overflow: hidden`, whatever sat to the right was
+ * clipped. The source picker lost its label and the nav icons vanished, taking the only
+ * route to Settings with them: the app hid its own controls in order to talk.
+ *
+ * Down here there is a row to spread into. Notices wrap, and the controls above never
+ * move whatever appears.
+ */
+.bar-notices {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s5) var(--s2) 86px;
+  background: var(--royal);
+  color: var(--white);
+  /* Continues the bar rather than starting a second surface, with a seam so the two read
+     as controls and commentary rather than as one crowded block. */
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  flex: none;
+  min-width: 0;
+}
+
+/* One line of commentary. Wraps, unlike everything in the bar above. */
+.bar-note {
+  margin: 0;
+  font-size: 13px;
+  opacity: 0.85;
+  min-width: 0;
+}
+
+/* The calendar prompt and the recording alerts. */
 .bar-prompt {
   display: flex;
   align-items: center;
@@ -296,7 +356,10 @@ select {
   border-radius: var(--radius-sm);
   background: rgb(255 255 255 / 8%);
   font-size: 13px;
-  white-space: nowrap;
+  /* Wrapping rather than `nowrap`: a long meeting title used to make this element as wide
+     as the title and push the bar's controls off the right edge. */
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .bar-alert {
@@ -307,7 +370,8 @@ select {
   border-radius: var(--radius-sm);
   border: 1px solid var(--quicksand);
   font-size: 12.5px;
-  white-space: nowrap;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .bar-alert .button {
