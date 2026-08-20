@@ -14,7 +14,7 @@
 //! by every audio element and editor without qualification.
 
 use crate::source::AudioFormat;
-use crate::Result;
+use crate::{AudioError, Result};
 
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -64,6 +64,41 @@ impl WavWriter {
         writer.write_header(0)?;
         writer.inner.flush()?;
         Ok(writer)
+    }
+
+    /// Reopens an existing file to carry on appending to it.
+    ///
+    /// The format and the frame count come from the file rather than from the caller,
+    /// which is the whole point: this runs after [`promote_to_stereo`] has rewritten the
+    /// file underneath a running recording, and taking either from memory would have the
+    /// writer append stereo frames using the old mono stride.
+    pub fn append(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
+
+        let format = read_format(&mut file)?.ok_or_else(|| {
+            AudioError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} is too short to hold a wav header", path.display()),
+            ))
+        })?;
+
+        let bytes_per_frame = format.channels.max(1) as u64 * (BITS_PER_SAMPLE as u64 / 8);
+        let data_len = file.metadata()?.len().saturating_sub(HEADER_LEN);
+        let frames_written = data_len / bytes_per_frame.max(1);
+
+        // Land exactly on the last whole frame. Appending after a partial one would swap
+        // the channels for every frame that follows it.
+        file.seek(SeekFrom::Start(HEADER_LEN + frames_written * bytes_per_frame))?;
+
+        Ok(Self {
+            path,
+            inner: BufWriter::new(file),
+            format,
+            frames_written,
+            frames_since_sync: 0,
+            finalized: false,
+        })
     }
 
     pub fn format(&self) -> AudioFormat {
@@ -270,6 +305,112 @@ pub fn repair(path: impl AsRef<Path>) -> Result<Repaired> {
     file.sync_all()?;
 
     Ok(Repaired { frames, format })
+}
+
+/// The largest data chunk a WAV can describe. The size fields are 32-bit, so a longer
+/// file would state a length that has wrapped around to a small number: it would open,
+/// play a while, and give no sign that the rest was ever there.
+const MAX_DATA_LEN: u64 = u32::MAX as u64;
+
+/// Rewrites a mono recording as a stereo one, moving what it holds to the right channel.
+///
+/// This is what lets a listen-only recording become a conversation recording without
+/// starting a second file. A WAV states its channel count in a header written before any
+/// audio exists, so there is no way to begin interleaving a second channel partway down
+/// the data chunk — the frames already written have to be restrided.
+///
+/// The left channel comes out silent, which is the honest reading rather than a
+/// placeholder: §4's guarantee is that listen-only never opens the microphone, so for
+/// that stretch there is genuinely nothing the user said to put there. It has the same
+/// shape as a muted span and a different cause, which is why the two are recorded
+/// separately instead of inferred from the zeros.
+///
+/// A temporary file beside the original takes the rewrite and is renamed over it at the
+/// end, so an interruption partway through leaves the original intact and playable rather
+/// than half-restrided. Beside it deliberately: `/tmp` can be a different volume, where
+/// the rename would stop being atomic.
+pub fn promote_to_stereo(path: impl AsRef<Path>) -> Result<Repaired> {
+    use std::io::Read;
+
+    let path = path.as_ref();
+    let mut input = File::open(path)?;
+
+    let Some(format) = read_format(&mut input)? else {
+        // Too short to hold a header: nothing was ever written, so there is nothing to
+        // restride. The caller gets its stereo header by reopening the file.
+        return Ok(Repaired {
+            frames: 0,
+            format: AudioFormat::new(0, 1),
+        });
+    };
+
+    if format.channels >= 2 {
+        // Already stereo. Report what is there rather than failing: the caller's job is
+        // to end up with a stereo file, and it already has one.
+        let frames = input.metadata()?.len().saturating_sub(HEADER_LEN)
+            / (format.channels as u64 * (BITS_PER_SAMPLE as u64 / 8));
+        return Ok(Repaired { frames, format });
+    }
+
+    let frames = input.metadata()?.len().saturating_sub(HEADER_LEN) / 2;
+    let stereo = AudioFormat::new(format.sample_rate, 2);
+    let data_len = frames * 4;
+
+    if data_len > MAX_DATA_LEN {
+        // Refused, not truncated. A recording this long cannot be widened without the
+        // header lying about its own length, and a file that plays the first stretch and
+        // silently omits the rest is the failure §3 is written against.
+        return Err(AudioError::InputFailed {
+            message: format!(
+                "this recording is already {} minutes long, and doubling it to carry a \
+                 microphone channel would exceed what a wav file can describe. Stop it \
+                 and start a new recording in conversation mode.",
+                stereo.duration_ms(frames) / 60_000
+            ),
+        });
+    }
+
+    let temporary = path.with_extension("stereo-partial");
+    let rewrite = (|| -> Result<()> {
+        let mut output = BufWriter::new(File::create(&temporary)?);
+        output.write_all(&header_bytes(stereo, data_len as u32))?;
+
+        input.seek(SeekFrom::Start(HEADER_LEN))?;
+        // Whole samples only, so a two-byte value is never split across two reads.
+        let mut mono = vec![0u8; 128 * 1024];
+        let mut interleaved = Vec::with_capacity(mono.len() * 2);
+        let mut remaining = frames * 2;
+
+        while remaining > 0 {
+            let want = remaining.min(mono.len() as u64) as usize;
+            input.read_exact(&mut mono[..want])?;
+
+            interleaved.clear();
+            for sample in mono[..want].chunks_exact(2) {
+                interleaved.extend_from_slice(&[0, 0]); // left: no microphone was open
+                interleaved.extend_from_slice(sample); // right: what was captured
+            }
+            output.write_all(&interleaved)?;
+            remaining -= want as u64;
+        }
+
+        output.flush()?;
+        output.get_mut().sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(error) = rewrite {
+        // The original is untouched and still playable. A half-written temporary left
+        // beside it would look like a recording of its own.
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+
+    std::fs::rename(&temporary, path)?;
+    Ok(Repaired {
+        frames,
+        format: stereo,
+    })
 }
 
 /// What an extracted span turned out to hold.
@@ -497,6 +638,121 @@ mod tests {
         assert_eq!(to_i16(2.0), 32767);
         assert_eq!(to_i16(-2.0), -32767);
         assert_eq!(to_i16(0.0), 0);
+    }
+
+    // ---- gaining a microphone partway through ----
+
+    #[test]
+    fn promoting_moves_the_recording_to_the_right_channel() {
+        let path = temp_path("promote");
+        let mut writer = WavWriter::create(&path, AudioFormat::new(48_000, 1))
+            .expect("writer should be created");
+        writer
+            .write_samples(&[0.5, -0.5, 0.25])
+            .expect("samples should write");
+        writer.finalize().expect("finalise should succeed");
+
+        let promoted = promote_to_stereo(&path).expect("promotion should succeed");
+        assert_eq!(promoted.frames, 3, "the frame count is unchanged");
+        assert_eq!(promoted.format.channels, 2);
+        assert_eq!(promoted.format.sample_rate, 48_000);
+
+        let (spec, samples) = read_back(&path);
+        assert_eq!(spec.channels, 2);
+        assert_eq!(spec.sample_rate, 48_000, "the rate must survive the rewrite");
+        assert_eq!(
+            samples,
+            vec![0, 16384, 0, -16384, 0, 8192],
+            "left silent, right carrying what was captured"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The recording continues into the same file, so what comes back has to be able to
+    /// keep writing at the new stride.
+    #[test]
+    fn a_promoted_file_can_be_appended_to_as_stereo() {
+        let path = temp_path("promote-append");
+        let mut writer = WavWriter::create(&path, AudioFormat::new(48_000, 1))
+            .expect("writer should be created");
+        writer.write_samples(&[0.5, 0.5]).expect("samples should write");
+        writer.finalize().expect("finalise should succeed");
+        drop(writer);
+
+        promote_to_stereo(&path).expect("promotion should succeed");
+
+        let mut writer = WavWriter::append(&path).expect("the file should reopen");
+        assert_eq!(writer.frames_written(), 2, "the length comes from the file");
+        assert_eq!(writer.format().channels, 2, "and so does the stride");
+
+        writer
+            .write_samples(&[1.0, -1.0])
+            .expect("a stereo frame should append");
+        writer.finalize().expect("finalise should succeed");
+
+        let (spec, samples) = read_back(&path);
+        assert_eq!(spec.channels, 2);
+        assert_eq!(
+            samples,
+            vec![0, 16384, 0, 16384, 32767, -32767],
+            "the appended frame follows the promoted ones without shifting them"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn promoting_a_file_that_is_already_stereo_leaves_it_alone() {
+        let path = temp_path("promote-stereo");
+        let mut writer = WavWriter::create(&path, AudioFormat::new(48_000, 2))
+            .expect("writer should be created");
+        writer
+            .write_samples(&[1.0, -1.0, 0.5, -0.5])
+            .expect("samples should write");
+        writer.finalize().expect("finalise should succeed");
+
+        let promoted = promote_to_stereo(&path).expect("promotion should be a no-op");
+        assert_eq!(promoted.frames, 2);
+        assert_eq!(promoted.format.channels, 2);
+
+        let (_, samples) = read_back(&path);
+        assert_eq!(samples, vec![32767, -32767, 16384, -16384], "audio untouched");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A recording that never got a single sample still has to be able to gain a
+    /// microphone — the switch can come seconds after the start.
+    #[test]
+    fn promoting_an_empty_recording_reports_nothing_rather_than_failing() {
+        let path = temp_path("promote-empty");
+        let writer = WavWriter::create(&path, AudioFormat::new(48_000, 1))
+            .expect("writer should be created");
+        drop(writer);
+
+        let promoted = promote_to_stereo(&path).expect("promotion should succeed");
+        assert_eq!(promoted.frames, 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Nothing may be left beside the recording that looks like a recording.
+    #[test]
+    fn promotion_leaves_no_temporary_file_behind() {
+        let path = temp_path("promote-tidy");
+        let mut writer = WavWriter::create(&path, AudioFormat::new(48_000, 1))
+            .expect("writer should be created");
+        writer.write_samples(&[0.1; 64]).expect("samples should write");
+        writer.finalize().expect("finalise should succeed");
+
+        promote_to_stereo(&path).expect("promotion should succeed");
+        assert!(
+            !path.with_extension("stereo-partial").exists(),
+            "the intermediate file must be gone"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// One second of stereo where every frame is numbered, so an extracted span can be
