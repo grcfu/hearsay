@@ -15,6 +15,7 @@ import {
 import type {
   ExportedAudio,
   HearsayEvent,
+  CaptureSpan,
   MuteSpan,
   ReclaimedAudio,
   Segment,
@@ -25,6 +26,7 @@ interface EventDetail {
   event: HearsayEvent;
   segments: Segment[];
   mute_spans: MuteSpan[];
+  capture_spans: CaptureSpan[];
 }
 
 interface TranscriptionEvent {
@@ -152,7 +154,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
     );
   }
 
-  const { event, segments, mute_spans: muteSpans } = detail;
+  const { event, segments, mute_spans: muteSpans, capture_spans: captureSpans } = detail;
   const duration = event.ended_at
     ? new Date(event.ended_at).getTime() - new Date(event.started_at).getTime()
     : null;
@@ -248,6 +250,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
           <Transcript
             segments={segments}
             muteSpans={muteSpans}
+            captureSpans={captureSpans}
             onSeek={seek}
             activeMs={playheadMs}
             speakerName={settings?.speaker_name}

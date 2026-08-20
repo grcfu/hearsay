@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { formatClock } from "../format";
-import type { MuteSpan, Segment } from "../types";
+import type { CaptureSpan, MuteSpan, Segment } from "../types";
 
 interface Props {
   segments: Segment[];
   muteSpans: MuteSpan[];
+  /** Stretches with no microphone at all, on a recording whose mode changed as it ran. */
+  captureSpans: CaptureSpan[];
   onSeek: (ms: number) => void;
   activeMs: number | null;
   /** What to call the person who recorded. Falls back to "You" when unset. */
@@ -15,24 +17,28 @@ interface Props {
 
 type Line =
   | { kind: "segment"; segment: Segment }
-  | { kind: "mute"; span: MuteSpan };
+  | { kind: "mute"; span: MuteSpan }
+  | { kind: "capture"; span: CaptureSpan };
 
 /**
- * The transcript, with muted stretches shown rather than skipped.
+ * The transcript, with unrecorded stretches shown rather than skipped.
  *
- * A gap in a transcript is ambiguous: nobody spoke, or the microphone was off? Every
- * muted span is rendered in place as an explicit marker, so time is never silently
- * missing from the record.
+ * A gap in a transcript is ambiguous: nobody spoke, or nothing was listening? Every such
+ * stretch is rendered in place as an explicit marker, so time is never silently missing
+ * from the record — and each says which of the three it was, because "I muted myself",
+ * "my microphone was not on" and "the recording was switching over" are different facts
+ * about the same silence.
  */
 export function Transcript({
   segments,
   muteSpans,
+  captureSpans,
   onSeek,
   activeMs,
   speakerName,
   canSeek,
 }: Props) {
-  const lines = interleave(segments, muteSpans);
+  const lines = interleave(segments, muteSpans, captureSpans);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
   const me = speakerName?.trim() ? speakerName.trim() : "You";
@@ -67,7 +73,7 @@ export function Transcript({
         <span className="small muted">
           {copyError
             ? "Could not copy — select the text and copy it manually."
-            : "Plain text with timestamps, muted stretches marked."}
+            : "Plain text with timestamps, unrecorded stretches marked."}
         </span>
       </div>
 
@@ -76,6 +82,10 @@ export function Transcript({
           line.kind === "mute" ? (
             <div className="mute-marker" key={`mute-${line.span.id}`}>
               [mic muted — {formatClock(line.span.start_ms)} to {formatClock(line.span.end_ms)}]
+            </div>
+          ) : line.kind === "capture" ? (
+            <div className="mute-marker" key={`capture-${line.span.id}`}>
+              {markerText(line.span)}
             </div>
           ) : (
             // Without audio these are still the transcript, just not a way into it. A
@@ -134,20 +144,42 @@ function Line({
 /**
  * The transcript as text, in the same shape the model is given.
  *
- * Muted stretches are carried across as markers rather than dropped. Pasting a transcript
- * with an unexplained gap somewhere else would lose the one piece of context that says the
- * silence was deliberate.
+ * Unrecorded stretches are carried across as markers rather than dropped. Pasting a
+ * transcript with an unexplained gap somewhere else would lose the one piece of context
+ * that says why the silence is there.
  */
 function toPlainText(lines: Line[], me: string): string {
   return lines
-    .map((line) =>
-      line.kind === "mute"
-        ? `[${formatClock(line.span.start_ms)}] [mic muted until ${formatClock(line.span.end_ms)}]`
-        : `[${formatClock(line.segment.start_ms)}] ${
-            line.segment.channel === "mic" ? me : "Them"
-          }: ${line.segment.text.trim()}`,
-    )
+    .map((line) => {
+      if (line.kind === "mute") {
+        return `[${formatClock(line.span.start_ms)}] [mic muted until ${formatClock(
+          line.span.end_ms,
+        )}]`;
+      }
+      if (line.kind === "capture") {
+        return markerText(line.span);
+      }
+      return `[${formatClock(line.segment.start_ms)}] ${
+        line.segment.channel === "mic" ? me : "Them"
+      }: ${line.segment.text.trim()}`;
+    })
     .join("\n");
+}
+
+/**
+ * What an unrecorded stretch says about itself.
+ *
+ * A system gap is given as a duration rather than an end time: it is always well under a
+ * second, so "12:03 to 12:03" would print the same clock twice and read as though nothing
+ * had been missed.
+ */
+function markerText(span: CaptureSpan): string {
+  const from = formatClock(span.start_ms);
+  if (span.kind === "system_audio_gap") {
+    const seconds = ((span.end_ms - span.start_ms) / 1000).toFixed(1);
+    return `[system audio not captured — ${from}, ${seconds}s, while the microphone was opened]`;
+  }
+  return `[no microphone — ${from} to ${formatClock(span.end_ms)}]`;
 }
 
 function isActive(segment: Segment, activeMs: number | null): boolean {
@@ -156,15 +188,20 @@ function isActive(segment: Segment, activeMs: number | null): boolean {
 }
 
 /**
- * Merges segments and mute spans into one timeline ordered by start time.
+ * Merges segments and every unrecorded stretch into one timeline ordered by start time.
  *
- * Mute markers sort by their start, so a muted stretch lands between the things said
+ * Markers sort by their start, so an unrecorded stretch lands between the things said
  * before and after it rather than being appended at the end.
  */
-function interleave(segments: Segment[], muteSpans: MuteSpan[]): Line[] {
+function interleave(
+  segments: Segment[],
+  muteSpans: MuteSpan[],
+  captureSpans: CaptureSpan[],
+): Line[] {
   const lines: Line[] = [
     ...segments.map((segment) => ({ kind: "segment" as const, segment })),
     ...muteSpans.map((span) => ({ kind: "mute" as const, span })),
+    ...captureSpans.map((span) => ({ kind: "capture" as const, span })),
   ];
 
   lines.sort((a, b) => {

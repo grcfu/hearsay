@@ -88,6 +88,23 @@ export interface MuteSpan {
   end_ms: number;
 }
 
+/**
+ * Why a stretch of a recording has no speech in it.
+ *
+ * `no_microphone` is stronger than a mute span: the microphone was not open at all, so
+ * nothing said in the room could have reached disk. `system_audio_gap` is the sub-second
+ * cost of opening one partway through, when the tap has to come down first.
+ */
+export type CaptureSpanKind = "no_microphone" | "system_audio_gap";
+
+export interface CaptureSpan {
+  id: number;
+  event_id: number;
+  kind: CaptureSpanKind;
+  start_ms: number;
+  end_ms: number;
+}
+
 /** Where a saved copy landed, and how big it turned out. */
 export interface ExportedAudio {
   path: string;

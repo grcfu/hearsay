@@ -25,6 +25,7 @@ interface LiveStatus {
   has_audio: boolean;
   silent_while_audio_playing: boolean;
   muted: boolean;
+  system_audio_lost: boolean;
   echo: { lag_ms: number; correlation: number } | null;
   dropped_ms: number;
   losing_audio: boolean;
@@ -267,6 +268,34 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     }
   };
 
+  /**
+   * Changes mode. Before a recording starts that is just a setting; once one is running
+   * it is a real change to what the machine is capturing, so it goes to the recorder.
+   *
+   * Both directions are reported rather than assumed. Going up can fail on the microphone
+   * and leave the session where it was, so the toggle follows what actually happened
+   * instead of what was asked for — a toggle that moves without the microphone moving
+   * would be the worst thing on this bar to get wrong.
+   */
+  const changeMode = async (wanted: Mode) => {
+    if (!recording) {
+      onModeChange(wanted);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await invoke<LiveStatus>("switch_mode", { mode: wanted });
+      setLive(next);
+      if (next.mode) onModeChange(next.mode);
+    } catch (problem) {
+      setError(String((problem as { message?: string })?.message ?? problem));
+      await poll();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const stop = async () => {
     setBusy(true);
     setError(null);
@@ -355,6 +384,22 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
                 </button>
               </div>
             ) : null}
+            {/* A switch to conversation has to take the tap down to open the microphone.
+                It almost always comes back; when it does not, the other half of the
+                meeting is no longer being recorded, and that cannot wait until playback
+                to be discovered. `bar-alert` rather than a quiet line, because unlike the
+                notes around it this one is worth stopping for. */}
+            {live?.system_audio_lost ? (
+              <div className="bar-alert">
+                <span>
+                  System audio did not come back after the switch. Only your microphone is
+                  being recorded.
+                </span>
+                <button type="button" className="button small" onClick={stop}>
+                  Stop and restart
+                </button>
+              </div>
+            ) : null}
             {live?.echo ? (
               <p className="small" style={{ opacity: 0.85, margin: "2px 6px 0" }}>
                 The other side is coming back through your microphone. Headphones would
@@ -419,10 +464,14 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
       </div>
 
       <div className="bar-group stack">
-        <ModeToggle mode={mode} onChange={onModeChange} disabled={recording} />
+        <ModeToggle mode={mode} onChange={changeMode} disabled={busy} />
         {showCaptions ? (
           <p className="bar-caption">
-            {mode === "listen_only" ? "Your mic stays off" : "Records you and them"}
+            {mode === "listen_only"
+              ? recording
+                ? "Your mic is off — switch to add it"
+                : "Your mic stays off"
+              : "Records you and them"}
           </p>
         ) : null}
       </div>
@@ -538,11 +587,15 @@ interface ToggleProps {
 }
 
 /**
- * Choosing between the two modes.
+ * Choosing between the two modes, before a recording and during one.
  *
- * Locked while recording: switching from listen-only to conversation mid-session would
- * mean opening the microphone partway through a recording the user started believing it
- * could not hear the room.
+ * Live rather than locked, because the meeting that turns into a conversation is a real
+ * thing that happens and the alternative is stopping and starting a second recording of
+ * the same meeting. It stays a deliberate press: nothing switches on its own, and the
+ * microphone only ever opens because someone pressed Conversation.
+ *
+ * Going up costs a sub-second gap in system audio, which is marked in the transcript.
+ * Going down closes the microphone outright rather than muting it.
  */
 export function ModeToggle({ mode, onChange, disabled }: ToggleProps) {
   return (
