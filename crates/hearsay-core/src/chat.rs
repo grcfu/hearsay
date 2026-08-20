@@ -18,8 +18,8 @@
 use crate::db::Segment;
 use crate::secrets;
 use crate::summary::{
-    render_transcript, speaker_or_default, Provider, API_URL, API_VERSION, FALLBACK_BETA,
-    GEMINI_URL,
+    render_transcript, speaker_or_default, Marker, Provider, API_URL, API_VERSION,
+    FALLBACK_BETA, GEMINI_URL,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -71,7 +71,7 @@ impl Turn {
 /// question, oldest first, and does not include it.
 pub fn ask(
     segments: &[Segment],
-    mute_spans: &[(i64, i64)],
+    markers: &[(Marker, i64, i64)],
     history: &[Turn],
     question: &str,
     model: &str,
@@ -83,7 +83,7 @@ pub fn ask(
     }
 
     let speaker = speaker_or_default(speaker);
-    let transcript = render_transcript(segments, mute_spans, Some(speaker));
+    let transcript = render_transcript(segments, markers, Some(speaker));
     if transcript.trim().is_empty() {
         return Err(anyhow!(
             "this recording has no transcript yet, and questions are answered from the \
@@ -328,6 +328,10 @@ below, with timestamps.
 - `[mic muted until MM:SS]` means the microphone was deliberately turned off for that \
   stretch. Never speculate about what was said there; if the answer might be in a muted \
   stretch, say that.
+- `[no microphone until MM:SS]` means the recording was not capturing {name} at all for \
+  that stretch. Anything they said in it is simply not there. Never fill it in, and if \
+  the answer might lie inside one, say so. `[system audio not captured for N]` is the \
+  same absence on the other side of the conversation, lasting under a second.
 - Transcription makes mistakes. If a name or number looks garbled, say what the \
   transcript reads and that it may be misheard rather than silently correcting it.
 - Be brief and direct. This is a working tool, not a report. Short paragraphs or bullets, \

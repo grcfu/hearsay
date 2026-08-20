@@ -138,12 +138,12 @@ impl Provider {
 /// no transcript, or the API declines — the caller shows these to the user verbatim.
 pub fn summarize(
     segments: &[Segment],
-    mute_spans: &[(i64, i64)],
+    markers: &[(Marker, i64, i64)],
     model: &str,
     speaker: Option<&str>,
 ) -> Result<Summary> {
     let speaker = speaker_or_default(speaker);
-    let transcript = render_transcript(segments, mute_spans, Some(speaker));
+    let transcript = render_transcript(segments, markers, Some(speaker));
     if transcript.trim().is_empty() {
         return Err(anyhow!(
             "this recording has no transcript yet, and summaries are written from the \
@@ -456,6 +456,12 @@ clearly took it — never guess a name.
 A line reading `[mic muted]` means {name} deliberately muted their microphone. Their side \
 of the conversation is missing there. Do not speculate about what was said.
 
+`[no microphone]` means the recording was not capturing {name} at all for that stretch — \
+they may have been speaking, and none of it was recorded. Do not treat it as {name} \
+staying quiet, and do not speculate about what they said. `[system audio not captured]` \
+is the same absence on the other side, for a second or so while the recording was \
+switched over.
+
 Use sentence case in headings. Keep it proportionate: a ten-minute call needs a handful \
 of bullets, not a report.";
 
@@ -483,27 +489,101 @@ fn user_prompt(transcript: &str, speaker: &str) -> String {
     )
 }
 
-/// Renders segments and mute spans into the text the model reads.
+/// Why a stretch of the recording has no speech in it.
 ///
-/// Timestamps are included so the summary can be traced back to the recording, and mute
-/// spans are marked in place so a gap in the conversation is never mistaken for silence.
+/// Three different absences that all look like silence in the audio and mean quite
+/// different things to a reader. Collapsing them would have the transcript assert things
+/// that are not true: that someone chose to go quiet when in fact nothing was recording
+/// them, or that a room fell silent when in fact the tap was down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Marker {
+    /// The microphone was open and deliberately silenced. §5.
+    Muted,
+    /// No microphone was open at all — the recording was listening only for this
+    /// stretch, so nothing said in the room could have reached disk. §4.
+    NoMicrophone,
+    /// The system tap was down while a microphone was being opened. §4. Under a second,
+    /// and the only stretch where it is the *other* side that is missing.
+    SystemGap,
+}
+
+impl Marker {
+    /// The kind string stored in `capture_spans`, or `None` for a mute span, which has a
+    /// table of its own.
+    pub fn from_kind(kind: &str) -> Option<Self> {
+        match kind {
+            crate::db::NO_MICROPHONE => Some(Marker::NoMicrophone),
+            crate::db::SYSTEM_AUDIO_GAP => Some(Marker::SystemGap),
+            _ => None,
+        }
+    }
+
+    fn render(self, start: i64, end: i64) -> String {
+        match self {
+            Marker::Muted => format!("[{}] [mic muted until {}]\n", clock(start), clock(end)),
+            Marker::NoMicrophone => format!(
+                "[{}] [no microphone until {}]\n",
+                clock(start),
+                clock(end)
+            ),
+            // A duration, not an end time. This gap is always well under a second, so
+            // `MM:SS until MM:SS` would print the same clock twice and read as though
+            // nothing had been missed at all.
+            Marker::SystemGap => format!(
+                "[{}] [system audio not captured for {}]\n",
+                clock(start),
+                brief(end - start)
+            ),
+        }
+    }
+}
+
+/// Every marked stretch of a recording, in the order they occurred.
+///
+/// Takes both tables because a transcript needs all of them at once, and building the
+/// list is the same three lines at every call site otherwise.
+pub fn markers(
+    mute_spans: &[crate::db::MuteSpan],
+    capture_spans: &[crate::db::CaptureSpan],
+) -> Vec<(Marker, i64, i64)> {
+    let mut all: Vec<(Marker, i64, i64)> = mute_spans
+        .iter()
+        .map(|span| (Marker::Muted, span.start_ms, span.end_ms))
+        .collect();
+    all.extend(capture_spans.iter().filter_map(|span| {
+        Marker::from_kind(&span.kind).map(|marker| (marker, span.start_ms, span.end_ms))
+    }));
+    all.sort_by_key(|(_, start, _)| *start);
+    all
+}
+
+/// Renders segments and marked stretches into the text the model reads.
+///
+/// Timestamps are included so the summary can be traced back to the recording, and every
+/// marked stretch is placed in the timeline where it happened, so a gap in the
+/// conversation is never mistaken for silence — and so the reason for the gap travels
+/// with it.
 pub fn render_transcript(
     segments: &[Segment],
-    mute_spans: &[(i64, i64)],
+    markers: &[(Marker, i64, i64)],
     speaker: Option<&str>,
 ) -> String {
     let speaker_label = speaker_or_default(speaker);
     #[derive(Debug)]
     enum Line<'a> {
         Spoken(&'a Segment),
-        Muted(i64, i64),
+        Marked(Marker, i64, i64),
     }
 
     let mut lines: Vec<Line<'_>> = segments.iter().map(Line::Spoken).collect();
-    lines.extend(mute_spans.iter().map(|(start, end)| Line::Muted(*start, *end)));
+    lines.extend(
+        markers
+            .iter()
+            .map(|(marker, start, end)| Line::Marked(*marker, *start, *end)),
+    );
     lines.sort_by_key(|line| match line {
         Line::Spoken(segment) => segment.start_ms,
-        Line::Muted(start, _) => *start,
+        Line::Marked(_, start, _) => *start,
     });
 
     let mut out = String::new();
@@ -517,12 +597,15 @@ pub fn render_transcript(
                     segment.text.trim()
                 ));
             }
-            Line::Muted(start, end) => {
-                out.push_str(&format!("[{}] [mic muted until {}]\n", clock(start), clock(end)));
-            }
+            Line::Marked(marker, start, end) => out.push_str(&marker.render(start, end)),
         }
     }
     out
+}
+
+/// A short stretch as a person would say it: "0.6s", "1.2s".
+fn brief(ms: i64) -> String {
+    format!("{:.1}s", ms.max(0) as f64 / 1000.0)
 }
 
 fn clock(ms: i64) -> String {
@@ -599,7 +682,7 @@ mod tests {
                 segment(1, "system", 0, "Any objections?"),
                 segment(2, "system", 90_000, "Right, moving on"),
             ],
-            &[(10_000, 65_000)],
+            &[(Marker::Muted, 10_000, 65_000)],
             None,
         );
         assert!(
@@ -610,6 +693,80 @@ mod tests {
         let muted_at = rendered.find("mic muted").expect("marker present");
         let moving_on = rendered.find("moving on").expect("later line present");
         assert!(muted_at < moving_on);
+    }
+
+    /// The three absences must not read as each other. A stretch nobody was recording is
+    /// not a stretch someone chose to go quiet in, and the summary must not describe it
+    /// as one.
+    #[test]
+    fn each_kind_of_absence_says_which_one_it_is() {
+        let rendered = render_transcript(
+            &[segment(1, "system", 0, "Thanks for coming")],
+            &[
+                (Marker::NoMicrophone, 0, 60_000),
+                (Marker::SystemGap, 60_000, 60_600),
+                (Marker::Muted, 120_000, 150_000),
+            ],
+            Some("Grace"),
+        );
+        assert!(rendered.contains("[00:00] [no microphone until 01:00]"), "got: {rendered}");
+        assert!(
+            rendered.contains("[01:00] [system audio not captured for 0.6s]"),
+            "got: {rendered}"
+        );
+        assert!(rendered.contains("[02:00] [mic muted until 02:30]"), "got: {rendered}");
+    }
+
+    /// Markers from the two tables have to interleave by time, not sit in table order:
+    /// a recording that switched mode twice has them alternating.
+    #[test]
+    fn markers_from_both_tables_are_ordered_by_when_they_happened() {
+        let muted = vec![crate::db::MuteSpan {
+            id: 1,
+            event_id: 1,
+            start_ms: 30_000,
+            end_ms: 40_000,
+        }];
+        let capture = vec![
+            crate::db::CaptureSpan {
+                id: 1,
+                event_id: 1,
+                kind: crate::db::NO_MICROPHONE.into(),
+                start_ms: 0,
+                end_ms: 20_000,
+            },
+            crate::db::CaptureSpan {
+                id: 2,
+                event_id: 1,
+                kind: crate::db::NO_MICROPHONE.into(),
+                start_ms: 90_000,
+                end_ms: 120_000,
+            },
+        ];
+
+        let all = markers(&muted, &capture);
+        assert_eq!(
+            all,
+            vec![
+                (Marker::NoMicrophone, 0, 20_000),
+                (Marker::Muted, 30_000, 40_000),
+                (Marker::NoMicrophone, 90_000, 120_000),
+            ]
+        );
+    }
+
+    /// A kind this build does not know about is left out rather than rendered as a
+    /// marker with no meaning. Nothing writes one today; a later migration could.
+    #[test]
+    fn an_unknown_kind_is_left_out_rather_than_guessed_at() {
+        let capture = vec![crate::db::CaptureSpan {
+            id: 1,
+            event_id: 1,
+            kind: "something_later".into(),
+            start_ms: 0,
+            end_ms: 10,
+        }];
+        assert!(markers(&[], &capture).is_empty());
     }
 
     #[test]

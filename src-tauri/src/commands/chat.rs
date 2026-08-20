@@ -8,7 +8,7 @@
 use crate::state::{AppState, CommandError, CommandResult};
 use hearsay_core::chat::{self, Turn};
 use hearsay_core::db::ChatMessage;
-use hearsay_core::summary::Provider;
+use hearsay_core::summary::{self, Provider};
 use hearsay_core::Database;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -88,11 +88,10 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64, question_id: i64, que
 
     let outcome = (|| -> anyhow::Result<String> {
         let segments = db.segments(event_id)?;
-        let spans: Vec<(i64, i64)> = db
-            .mute_spans(event_id)?
-            .into_iter()
-            .map(|span| (span.start_ms, span.end_ms))
-            .collect();
+        // Every stretch with no speech in it, and why. A recording whose mode changed
+        // has stretches with no microphone at all, and the model must not read those as
+        // the user choosing to go quiet.
+        let markers = summary::markers(&db.mute_spans(event_id)?, &db.capture_spans(event_id)?);
 
         // Everything before this question. The question itself is already stored, so it
         // would otherwise be sent twice.
@@ -110,7 +109,7 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64, question_id: i64, que
         let speaker = db.preference(SPEAKER_NAME_KEY)?;
         chat::ask(
             &segments,
-            &spans,
+            &markers,
             &history,
             question,
             model,

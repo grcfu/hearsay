@@ -58,17 +58,17 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64) {
 
     let outcome = (|| -> anyhow::Result<()> {
         let segments = db.segments(event_id)?;
-        let spans: Vec<(i64, i64)> = db
-            .mute_spans(event_id)?
-            .into_iter()
-            .map(|span| (span.start_ms, span.end_ms))
-            .collect();
+        // Every stretch with no speech in it, and why. A recording whose mode changed
+        // has stretches with no microphone at all, and the model must not read those as
+        // the user choosing to go quiet.
+        let markers = summary::markers(&db.mute_spans(event_id)?, &db.capture_spans(event_id)?);
 
         // Each provider names its own model; the caller does not choose one.
         let model = Provider::current().default_model();
         // The name the summary should call the recorder by. Unset simply means "You".
         let speaker = db.preference(SPEAKER_NAME_KEY)?;
-        let summary = summary::summarize(&segments, &spans, model, speaker.as_deref())?;
+        let summary =
+            summary::summarize(&segments, &markers, model, speaker.as_deref())?;
         db.set_summary(
             event_id,
             &summary.to_markdown(speaker.as_deref()),
