@@ -52,6 +52,14 @@ pub struct Mixer {
     max_backlog: usize,
     /// Frames held back from the writer so the scrub has something to erase.
     delay_frames: usize,
+    /// Whether a microphone is currently feeding [`Channel::Mic`].
+    ///
+    /// Separate from `channels`, which describes the *file*. Once a recording has been
+    /// upgraded to conversation its file is stereo for good, but the microphone can be
+    /// closed again afterwards — and a channel nobody is filling must not be waited on,
+    /// or `committable_frames` would return zero for the rest of the recording and the
+    /// file would stop growing.
+    mic_present: bool,
     /// While true, microphone samples are replaced by zeros on the way in.
     ///
     /// Deliberately applied here rather than by stopping the device: the input stream
@@ -79,6 +87,7 @@ impl Mixer {
             channels,
             max_backlog: (delay_frames + slack).max(1),
             delay_frames,
+            mic_present: channels > 1,
             muted: false,
             dropped_frames: 0,
         }
@@ -89,12 +98,62 @@ impl Mixer {
         self.delay_frames
     }
 
+    /// Widens the output from one channel to two, for a recording being upgraded from
+    /// listen-only to conversation mid-session.
+    ///
+    /// Only ever called with both queues already drained, so the first stereo frame
+    /// pairs microphone audio and system audio captured at the same instant. Widening
+    /// with a backlog on either side would offset the two channels by the size of that
+    /// backlog for the rest of the recording, and every timestamp after the switch —
+    /// along with the speaker attribution resting on it — would be wrong.
+    pub fn set_channels(&mut self, channels: u16) {
+        self.channels = channels;
+    }
+
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    /// Says whether a microphone is feeding the mic channel.
+    ///
+    /// Set false when the microphone is closed mid-recording: the queue keeps whatever it
+    /// still holds — that audio was captured and is still inside the scrub window — and
+    /// once it runs dry [`Mixer::take`] pads the channel with true zeros.
+    pub fn set_mic_present(&mut self, present: bool) {
+        self.mic_present = present;
+    }
+
+    pub fn mic_present(&self) -> bool {
+        self.mic_present
+    }
+
+    /// Changes how long audio is held back before it can be committed.
+    ///
+    /// Raised from zero when a listen-only recording gains a microphone, because from
+    /// that moment there is something for the retroactive scrub to erase. The backlog cap
+    /// moves with it: leaving it at the old value would have the mixer trim the very
+    /// audio the new delay is asking it to hold, and report it as dropped.
+    pub fn set_delay_frames(&mut self, delay_frames: usize) {
+        self.delay_frames = delay_frames;
+        let slack = (self.sample_rate as f32 * BACKLOG_SLACK_SECONDS) as usize;
+        self.max_backlog = (delay_frames + slack).max(1);
+    }
+
+    /// Empties both queues and returns everything they held as interleaved frames.
+    ///
+    /// Used at a mode switch, where the file's channel count is about to change and
+    /// nothing may be left buffered across the boundary.
+    pub fn drain(&mut self) -> Vec<f32> {
+        let frames = self.pending_frames();
+        self.take(frames)
+    }
+
     /// Frames old enough to commit — everything buffered beyond the delay.
     ///
     /// In conversation mode this is the shorter of the two channels: a frame is only
     /// committable once both sides of it exist, or they would drift apart.
     pub fn committable_frames(&self) -> usize {
-        let buffered = if self.channels <= 1 {
+        let buffered = if self.channels <= 1 || !self.mic_present {
             self.system.len()
         } else {
             self.mic.len().min(self.system.len())
@@ -185,7 +244,7 @@ impl Mixer {
 
     /// Frames available on the shorter of the active channels.
     pub fn buffered_frames(&self) -> usize {
-        if self.channels <= 1 {
+        if self.channels <= 1 || !self.mic_present {
             self.system.len()
         } else {
             self.mic.len().min(self.system.len())
@@ -388,6 +447,89 @@ mod tests {
         mixer.push(Channel::System, &vec![0.5; 300]);
         assert_eq!(mixer.committable_frames(), 0);
         assert_eq!(mixer.pending_frames(), 300, "the tail must still be flushable at stop");
+    }
+
+    // ---- switching mode mid-recording ----
+
+    /// The switch drains both queues first, so the first stereo frame pairs audio
+    /// captured at the same instant on both devices.
+    #[test]
+    fn widening_to_stereo_after_a_drain_keeps_the_channels_aligned() {
+        let mut mixer = Mixer::new(1_000, 1);
+        mixer.push(Channel::System, &[0.1, 0.2, 0.3]);
+
+        let drained = mixer.drain();
+        assert_eq!(drained, vec![0.1, 0.2, 0.3], "mono frames come out one per frame");
+        assert_eq!(mixer.pending_frames(), 0, "nothing may straddle the switch");
+
+        mixer.set_channels(2);
+        mixer.set_mic_present(true);
+
+        mixer.push(Channel::Mic, &[0.9]);
+        mixer.push(Channel::System, &[0.4]);
+        assert_eq!(mixer.take(1), vec![0.9, 0.4]);
+    }
+
+    #[test]
+    fn raising_the_delay_raises_the_backlog_cap_with_it() {
+        let mut mixer = Mixer::new(1_000, 1); // no delay: 1 s of slack, 1000 frames
+        mixer.set_delay_frames(2_000);
+
+        // Two seconds of audio inside a two-second window must survive: trimming it
+        // would drop the very frames the scrub was just asked to protect.
+        mixer.push(Channel::System, &vec![0.5; 2_000]);
+        assert_eq!(mixer.dropped_frames(), 0);
+        assert_eq!(mixer.committable_frames(), 0, "all of it is inside the window");
+    }
+
+    /// The failure this guards against: closing the microphone leaves its queue empty
+    /// forever, and a `min` across both channels would then pin the file's length where
+    /// it stood at the switch for the rest of the meeting.
+    #[test]
+    fn closing_the_microphone_does_not_stall_the_file() {
+        let mut mixer = Mixer::new(1_000, 2);
+        mixer.set_mic_present(false);
+
+        mixer.push(Channel::System, &vec![0.5; 100]);
+        assert_eq!(
+            mixer.committable_frames(),
+            100,
+            "system audio must stay committable with no microphone feeding the other side"
+        );
+
+        let frames = mixer.take(2);
+        assert_eq!(frames, vec![0.0, 0.5, 0.0, 0.5], "the left channel pads with zeros");
+    }
+
+    /// Microphone audio captured before the switch is still inside the scrub window and
+    /// still aligned, so it belongs in the file rather than being discarded.
+    #[test]
+    fn microphone_audio_buffered_before_it_closed_is_still_written() {
+        let mut mixer = Mixer::new(1_000, 2);
+        mixer.push(Channel::Mic, &[0.7, 0.7]);
+        mixer.push(Channel::System, &[0.1, 0.2, 0.3]);
+
+        mixer.set_mic_present(false);
+
+        let frames = mixer.take(3);
+        assert_eq!(
+            frames,
+            vec![0.7, 0.1, 0.7, 0.2, 0.0, 0.3],
+            "the two frames it did capture keep their place, then the channel goes quiet"
+        );
+    }
+
+    /// The scrub has to keep working on audio captured while the microphone was open,
+    /// which is why the delay is not dropped back to zero when it closes.
+    #[test]
+    fn the_scrub_still_reaches_microphone_audio_after_the_microphone_closed() {
+        let mut mixer = Mixer::with_delay(1_000, 2, 500);
+        mixer.push(Channel::Mic, &vec![0.9; 400]);
+        mixer.push(Channel::System, &vec![0.3; 400]);
+
+        mixer.set_mic_present(false);
+
+        assert_eq!(mixer.scrub_mic(), 400, "held-back mic audio is still erasable");
     }
 
     #[test]
