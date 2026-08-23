@@ -418,6 +418,46 @@ mod tests {
         assert_eq!(mixer.take_arrival_peaks().0, 0.7);
     }
 
+    /// The worst moment for the meter to go dark is the one right after somebody presses
+    /// Conversation: the switch raises the commit delay from zero to the full scrub
+    /// window, so the file stops growing for a minute — and the old meter, fed from
+    /// committed frames, went dead at exactly the moment the user was watching to see
+    /// whether their microphone had come up.
+    ///
+    /// Mirrors what `Recording::set_mode` does to the mixer: drain, widen, then hold.
+    #[test]
+    fn the_meter_stays_live_across_a_switch_to_conversation() {
+        let rate = 48_000;
+        let mut mixer = Mixer::new(rate, 1);
+        mixer.push(Channel::System, &[0.3; 64]);
+
+        assert_eq!(mixer.take_arrival_peaks().1, 0.3, "listen-only commits immediately");
+
+        // The switch: nothing may be left buffered across the boundary, and from here
+        // there is a microphone to protect.
+        mixer.push(Channel::System, &[0.9; 32]);
+        mixer.drain();
+        mixer.set_channels(2);
+        mixer.set_mic_present(true);
+        mixer.set_delay_frames(rate as usize * SCRUB_WINDOW_SECONDS as usize);
+
+        assert_eq!(
+            mixer.take_arrival_peaks().1,
+            0.9,
+            "draining the queues must not take the meter with it"
+        );
+
+        mixer.push(Channel::Mic, &[0.5; 64]);
+        mixer.push(Channel::System, &[0.2; 64]);
+
+        assert_eq!(mixer.committable_frames(), 0, "the new delay holds all of it back");
+        assert_eq!(
+            mixer.take_arrival_peaks(),
+            (0.5, 0.2),
+            "both channels have to show up while the file is not growing"
+        );
+    }
+
     /// Muting must write zeros, not drop samples — dropping would shorten the left
     /// channel and desynchronise everything after the muted span.
     #[test]
