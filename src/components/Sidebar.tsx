@@ -101,6 +101,12 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     };
   }, []);
 
+  // Keyed on the mode as well as on whether a recording is running: whether muting and
+  // the scrub apply at all depends on a microphone being open, and §4 lets that change
+  // mid-recording. Keyed on `recording` alone, a session switched up to conversation
+  // kept its controls hidden until the hotkey happened to fire, and one switched back
+  // down went on offering a mute for a device that had been closed.
+  const liveMode = live?.mode ?? null;
   useEffect(() => {
     if (!recording) {
       setMute({ muted: false, applicable: false });
@@ -109,7 +115,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     void invoke<{ muted: boolean; applicable: boolean }>("mute_state")
       .then(setMute)
       .catch(() => undefined);
-  }, [recording]);
+  }, [recording, liveMode]);
 
   const [scrubbed, setScrubbed] = useState<string | null>(null);
   const [meeting, setMeeting] = useState<{ id: string; title: string } | null>(null);
