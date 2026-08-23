@@ -70,7 +70,7 @@ const DROPPED_AUDIO_ALARM_MS: u64 = 1_000;
 pub struct RecordingStatus {
     pub elapsed_ms: u64,
     pub frames_written: u64,
-    /// Loudest audio to have arrived recently, for a meter.
+    /// Loudest audio to have arrived recently on either channel, for a meter.
     ///
     /// Read from what the mixer is being fed, not from what the writer has committed.
     /// Conversation mode holds its first minute back for the scrub, so a meter fed from
@@ -78,6 +78,16 @@ pub struct RecordingStatus {
     /// capturing normally then looks identical to one whose tap is dead. Distinguishing
     /// those two is the entire job of the meter.
     pub peak: f32,
+    /// The same reading for the microphone alone. Zero whenever no microphone is open,
+    /// and zero while muted, because that is what is reaching the file.
+    pub mic_peak: f32,
+    /// The same reading for the system tap alone.
+    ///
+    /// Split out because the combined figure cannot answer the question a meter is
+    /// really asked in conversation mode. One set of bars moving says *something* is
+    /// being captured; it does not say whether the microphone is among it, and a mic
+    /// that never came up looks the same as a quiet room.
+    pub system_peak: f32,
     /// True once the system tap has produced a non-zero sample. If this stays false
     /// while a recording runs, the recording is silent and the user needs to know now
     /// rather than at playback.
@@ -923,7 +933,8 @@ fn spawn_writer(
             let mut produced_audio = false;
             let mut next_echo_check = FIRST_ECHO_CHECK;
             let mut warned_about_drops = false;
-            let mut meter = 0.0f32;
+            let mut mic_meter = 0.0f32;
+            let mut system_meter = 0.0f32;
 
             loop {
                 let stopping = shared.stop.load(Ordering::Relaxed);
@@ -1020,11 +1031,14 @@ fn spawn_writer(
                     );
                 }
 
-                meter = meter_level(meter, mic_arrival.max(system_arrival));
+                mic_meter = meter_level(mic_meter, mic_arrival);
+                system_meter = meter_level(system_meter, system_arrival);
 
                 if let Ok(mut status) = shared.status.lock() {
                     status.elapsed_ms = elapsed.as_millis() as u64;
-                    status.peak = meter;
+                    status.peak = mic_meter.max(system_meter);
+                    status.mic_peak = mic_meter;
+                    status.system_peak = system_meter;
                     status.dropped_ms = dropped_ms;
                     status.losing_audio = losing_audio;
                 }
