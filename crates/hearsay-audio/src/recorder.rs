@@ -41,6 +41,22 @@ const ANALYSIS_SECONDS: usize = 2;
 const FIRST_ECHO_CHECK: Duration = Duration::from_secs(12);
 const ECHO_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How much of the meter's level survives a tick with nothing new arriving.
+///
+/// Readers hand over audio every POLL_INTERVAL and the writer reads the level every
+/// WRITE_INTERVAL; the two are the same length and are not synchronised, so some ticks
+/// see two chunks and some see none. Reported raw, the meter would stutter to zero
+/// between chunks — and the UI, which samples it five times slower again, would catch
+/// those gaps at random and look like it was losing audio.
+///
+/// Rises are instant and only the fall is smoothed, which is ordinary peak-meter
+/// ballistics. At this rate a tap that dies goes dark in about a second: far too quick
+/// to hide a real failure, far too slow to flicker.
+const METER_FALL_PER_TICK: f32 = 0.55;
+
+/// Below this the meter is dark, rather than trailing a decay nobody can see forever.
+const METER_FLOOR: f32 = 1e-4;
+
 /// How much dropped audio counts as losing audio rather than trimming clock drift.
 ///
 /// The mixer trims a channel that runs ahead of the clock, and two devices at a nominal
@@ -881,6 +897,18 @@ fn spawn_mic_reader(mut mic: MicSource, target_rate: u32, shared: Arc<Shared>) -
     Ok(Reader { handle, retire })
 }
 
+/// Where the meter sits after one tick, given where it sat before and the loudest sample
+/// that arrived during it.
+fn meter_level(previous: f32, arrival: f32) -> f32 {
+    let fallen = previous * METER_FALL_PER_TICK;
+    let level = arrival.max(fallen);
+    if level < METER_FLOOR {
+        0.0
+    } else {
+        level
+    }
+}
+
 /// Commits elapsed frames to the WAV on a wall clock.
 fn spawn_writer(
     shared: Arc<Shared>,
@@ -895,6 +923,7 @@ fn spawn_writer(
             let mut produced_audio = false;
             let mut next_echo_check = FIRST_ECHO_CHECK;
             let mut warned_about_drops = false;
+            let mut meter = 0.0f32;
 
             loop {
                 let stopping = shared.stop.load(Ordering::Relaxed);
@@ -991,9 +1020,11 @@ fn spawn_writer(
                     );
                 }
 
+                meter = meter_level(meter, mic_arrival.max(system_arrival));
+
                 if let Ok(mut status) = shared.status.lock() {
                     status.elapsed_ms = elapsed.as_millis() as u64;
-                    status.peak = mic_arrival.max(system_arrival);
+                    status.peak = meter;
                     status.dropped_ms = dropped_ms;
                     status.losing_audio = losing_audio;
                 }
@@ -1093,6 +1124,40 @@ fn spawn_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The meter has to answer loud audio at once. A meter that ramped up would
+    /// understate the first second of every recording.
+    #[test]
+    fn the_meter_rises_the_moment_audio_arrives() {
+        assert_eq!(meter_level(0.0, 0.8), 0.8);
+        assert_eq!(meter_level(0.2, 0.8), 0.8);
+    }
+
+    /// Between two chunks the meter has to hold rather than blink, or the UI — which
+    /// samples it five times slower than the writer ticks — catches the blink and reads
+    /// as audio coming and going.
+    #[test]
+    fn the_meter_holds_through_a_tick_with_nothing_in_it() {
+        let held = meter_level(0.8, 0.0);
+        assert!(held > 0.4, "fell to {held} in one tick, which the UI would see as a gap");
+    }
+
+    /// The other half of the bargain: holding is only acceptable if a tap that dies
+    /// still goes dark quickly. Anything slower and the meter would vouch for audio that
+    /// stopped arriving.
+    #[test]
+    fn the_meter_goes_dark_about_a_second_after_the_audio_stops() {
+        let mut level = 1.0;
+        for _ in 0..(1000 / WRITE_INTERVAL.as_millis()) {
+            level = meter_level(level, 0.0);
+        }
+        assert!(level < 0.01, "still reading {level} a second after the audio stopped");
+
+        for _ in 0..20 {
+            level = meter_level(level, 0.0);
+        }
+        assert_eq!(level, 0.0, "the decay has to reach zero, not approach it");
+    }
 
     /// Not a behavioural test so much as a standing assertion about the shape of the
     /// code: listen-only must not be able to reach a microphone.
