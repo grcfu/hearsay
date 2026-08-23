@@ -67,6 +67,10 @@ pub struct Mixer {
     /// timeline — just zeros. See `CLAUDE.md` §5.
     muted: bool,
     dropped_frames: u64,
+    /// Loudest microphone sample accepted since the meter last read it.
+    arrival_peak_mic: f32,
+    /// Loudest system sample accepted since the meter last read it.
+    arrival_peak_system: f32,
 }
 
 impl Mixer {
@@ -90,6 +94,8 @@ impl Mixer {
             mic_present: channels > 1,
             muted: false,
             dropped_frames: 0,
+            arrival_peak_mic: 0.0,
+            arrival_peak_system: 0.0,
         }
     }
 
@@ -184,20 +190,56 @@ impl Mixer {
         self.dropped_frames
     }
 
+    /// The loudest sample each channel has accepted since this was last called, as
+    /// `(mic, system)`, and resets both.
+    ///
+    /// This is the level meter's only honest source. Reading the meter off committed
+    /// frames instead leaves it dead for the whole of [`SCRUB_WINDOW_SECONDS`] at the
+    /// start of a conversation recording, which looks exactly like the failure
+    /// `CLAUDE.md` §3 warns about — a tap that runs, reports success, and captures
+    /// nothing. The meter is the one instrument that separates those two, so it has to
+    /// move when audio arrives, not when it reaches disk.
+    ///
+    /// Reset on read, so a channel that has gone quiet falls back to zero instead of
+    /// holding its loudest moment for the rest of the meeting.
+    pub fn take_arrival_peaks(&mut self) -> (f32, f32) {
+        let peaks = (self.arrival_peak_mic, self.arrival_peak_system);
+        self.arrival_peak_mic = 0.0;
+        self.arrival_peak_system = 0.0;
+        peaks
+    }
+
     /// Accepts mono samples for one channel.
     pub fn push(&mut self, channel: Channel, samples: &[f32]) {
+        let muted_mic = channel == Channel::Mic && self.muted;
         let queue = match channel {
             Channel::Mic => &mut self.mic,
             Channel::System => &mut self.system,
         };
 
-        if channel == Channel::Mic && self.muted {
+        if muted_mic {
             // Zeros, not a skip: skipping would shorten the left channel and shift
             // everything after it out of alignment with the right.
             queue.extend(std::iter::repeat(0.0).take(samples.len()));
         } else {
             queue.extend(samples.iter().copied());
         }
+
+        // Measured on the way in, and after muting, so the meter can report what is
+        // reaching the file rather than what has already been committed to it. A muted
+        // microphone reads as zero on purpose: a meter that moved with the user's voice
+        // while their microphone was writing silence would tell them they are being
+        // recorded when they are not.
+        let loudest = if muted_mic {
+            0.0
+        } else {
+            samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+        };
+        let arrival = match channel {
+            Channel::Mic => &mut self.arrival_peak_mic,
+            Channel::System => &mut self.arrival_peak_system,
+        };
+        *arrival = arrival.max(loudest);
 
         if queue.len() > self.max_backlog {
             let excess = queue.len() - self.max_backlog;
@@ -323,6 +365,57 @@ mod tests {
         let mut mixer = Mixer::new(48_000, 1);
         mixer.push(Channel::System, &[0.1, 0.2]);
         assert_eq!(mixer.take(2), vec![0.1, 0.2]);
+    }
+
+    /// The symptom this exists to stop: a conversation recording holds its first minute
+    /// back for the scrub, so nothing is committable yet — and a meter fed from
+    /// committed frames sits dead through all of it, indistinguishable from a dead tap.
+    #[test]
+    fn the_arrival_peak_moves_before_anything_is_committable() {
+        let rate = 48_000;
+        let held = rate as usize * SCRUB_WINDOW_SECONDS as usize;
+        let mut mixer = Mixer::with_delay(rate, 2, held);
+
+        mixer.push(Channel::Mic, &[0.4, -0.6]);
+        mixer.push(Channel::System, &[0.2, -0.3]);
+
+        assert_eq!(mixer.committable_frames(), 0, "the window still holds all of it");
+        assert_eq!(mixer.take_arrival_peaks(), (0.6, 0.3));
+    }
+
+    /// Reset on read, or one loud moment would light the meter for the rest of the
+    /// meeting and it would stop reporting anything at all.
+    #[test]
+    fn reading_the_arrival_peak_resets_it() {
+        let mut mixer = Mixer::new(48_000, 2);
+        mixer.push(Channel::System, &[0.9]);
+
+        assert_eq!(mixer.take_arrival_peaks(), (0.0, 0.9));
+        assert_eq!(mixer.take_arrival_peaks(), (0.0, 0.0), "nothing arrived since");
+    }
+
+    /// A muted microphone writes zeros to the file, so it reads as zero here too. The
+    /// alternative is a meter that answers the user's voice while none of it is being
+    /// kept — a mute button that looks like it did not work.
+    #[test]
+    fn a_muted_microphone_does_not_light_the_meter() {
+        let mut mixer = Mixer::new(48_000, 2);
+        mixer.set_muted(true);
+        mixer.push(Channel::Mic, &[0.9, -0.9]);
+        mixer.push(Channel::System, &[0.5]);
+
+        assert_eq!(mixer.take_arrival_peaks(), (0.0, 0.5));
+    }
+
+    /// The scrub erases what was captured; the meter reports what is arriving. Blanking
+    /// it would make ⌘⇧X look like it had stopped the recording.
+    #[test]
+    fn the_scrub_does_not_blank_the_meter() {
+        let mut mixer = Mixer::new(48_000, 2);
+        mixer.push(Channel::Mic, &[0.7]);
+        mixer.scrub_mic();
+
+        assert_eq!(mixer.take_arrival_peaks().0, 0.7);
     }
 
     /// Muting must write zeros, not drop samples — dropping would shorten the left
