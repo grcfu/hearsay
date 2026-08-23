@@ -953,6 +953,22 @@ select {
   background: var(--white);
 }
 
+/* Two meters side by side need saying which is which. Small letterspaced caps, like
+   every other label that indexes something. */
+.meter-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.meter-label {
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgb(255 255 255 / 62%);
+}
+
 /* ---------- Saving a copy of the audio ---------- */
 
 /*

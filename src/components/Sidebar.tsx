@@ -22,6 +22,8 @@ interface LiveStatus {
   elapsed_ms: number;
   frames_written: number;
   peak: number;
+  mic_peak: number;
+  system_peak: number;
   has_audio: boolean;
   silent_while_audio_playing: boolean;
   muted: boolean;
@@ -491,7 +493,17 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
               <span className="recording-dot" aria-hidden />
               <span className="live-elapsed">{formatClock(live?.elapsed_ms ?? 0)}</span>
               <span className="spacer" />
-              <LevelMeter peak={live?.peak ?? 0} />
+              {/* Two meters only while a microphone is actually open. Read from the
+                  polled mode rather than from mute state, which is refreshed on start
+                  and by the hotkey — not by a switch. */}
+              {live?.mode === "conversation" ? (
+                <>
+                  <LevelMeter peak={live.mic_peak} label="You" />
+                  <LevelMeter peak={live.system_peak} label="Them" />
+                </>
+              ) : (
+                <LevelMeter peak={live?.system_peak ?? live?.peak ?? 0} />
+              )}
             </div>
             {mute.applicable ? (
               <button
@@ -645,15 +657,33 @@ function SettingsIcon() {
   );
 }
 
-/** A level meter, drawn in plain white — a meter is not a recording signal. */
-function LevelMeter({ peak }: { peak: number }) {
+/**
+ * A level meter, drawn in plain white — a meter is not a recording signal.
+ *
+ * Labelled only when there are two of them: one meter needs no explaining, and the
+ * labels match the transcript's sides, so the left one is the user either way.
+ */
+function LevelMeter({ peak, label }: { peak: number; label?: string }) {
   const bars = 5;
   const lit = Math.min(bars, Math.round(Math.sqrt(Math.max(0, peak)) * bars));
-  return (
-    <span className="meter" aria-label={`Level ${Math.round(peak * 100)} percent`}>
+  const meter = (
+    <span
+      className="meter"
+      aria-label={`${label ? `${label} level` : "Level"} ${Math.round(peak * 100)} percent`}
+    >
       {Array.from({ length: bars }, (_, index) => (
         <span key={index} className={`meter-bar${index < lit ? " lit" : ""}`} />
       ))}
+    </span>
+  );
+
+  if (!label) return meter;
+  return (
+    <span className="meter-pair">
+      <span className="meter-label" aria-hidden>
+        {label}
+      </span>
+      {meter}
     </span>
   );
 }
