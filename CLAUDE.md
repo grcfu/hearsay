@@ -229,8 +229,21 @@ it started.
 This is a primary feature, not a nicety. The mute button only helps someone who remembers to press
 it beforehand; the scrub is what covers the case where they didn't.
 
-Consequence: the mic channel is written to disk on a 60-second delay relative to the system channel.
-The writer compensates so the two channels stay sample-aligned in the final file.
+Consequence: **both** channels are written to disk on a 60-second delay, not just the
+mic. Committing the system channel immediately and the mic a minute later would leave the
+two a minute out of step in the finished file, and every timestamp — along with the
+speaker attribution resting on it — would be wrong. Listen-only has no microphone and so
+nothing to scrub, and commits immediately.
+
+So in `conversation` the file does not grow for the first minute of a recording, and that
+is expected. **What must never be quiet during it is the level meter.** A meter fed from
+committed frames reads zero for that whole minute, which is indistinguishable from §3's
+characteristic failure — a tap that runs, reports success and captures silence. So the
+meter reads the loudest sample *arriving* at the mixer, per channel, with an instant rise
+and a fall fast enough that a tap which dies goes dark within a second. The two channels
+are metered separately: a combined reading cannot say whether the microphone is among
+what is being captured, so a mic that never came up looks like a quiet room until
+playback.
 
 ---
 
