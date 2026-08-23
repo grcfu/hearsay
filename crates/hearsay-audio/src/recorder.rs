@@ -54,7 +54,13 @@ const DROPPED_AUDIO_ALARM_MS: u64 = 1_000;
 pub struct RecordingStatus {
     pub elapsed_ms: u64,
     pub frames_written: u64,
-    /// Peak level of the most recent committed buffer, for a meter.
+    /// Loudest audio to have arrived recently, for a meter.
+    ///
+    /// Read from what the mixer is being fed, not from what the writer has committed.
+    /// Conversation mode holds its first minute back for the scrub, so a meter fed from
+    /// committed frames sits at zero through all of it — and a recording that is
+    /// capturing normally then looks identical to one whose tap is dead. Distinguishing
+    /// those two is the entire job of the meter.
     pub peak: f32,
     /// True once the system tap has produced a non-zero sample. If this stays false
     /// while a recording runs, the recording is silent and the user needs to know now
@@ -928,9 +934,7 @@ fn spawn_writer(
                             };
 
                             if !samples.is_empty() {
-                                let peak =
-                                    samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
-                                if peak > 0.0 {
+                                if samples.iter().any(|sample| *sample != 0.0) {
                                     produced_audio = true;
                                 }
                                 writer.write_samples(&samples)?;
@@ -951,7 +955,6 @@ fn spawn_writer(
 
                                 if let Ok(mut status) = shared.status.lock() {
                                     status.frames_written = writer.frames_written();
-                                    status.peak = peak;
                                 }
                             }
                         }
@@ -961,11 +964,20 @@ fn spawn_writer(
                 // Dropped audio is the one loss that leaves no trace in the file: the
                 // frames are simply not there, and nothing downstream can tell they were
                 // ever captured. Counting them is useless unless somebody is told.
-                let (dropped_frames, stereo) = shared
+                let (dropped_frames, stereo, (mic_arrival, system_arrival)) = shared
                     .mixer
                     .lock()
-                    .map(|mixer| (mixer.dropped_frames(), mixer.channels() >= 2))
-                    .unwrap_or((0, false));
+                    .map(|mut mixer| {
+                        (
+                            mixer.dropped_frames(),
+                            mixer.channels() >= 2,
+                            // Read every tick, not only the ticks that commit — a
+                            // recording holding its first minute back for the scrub
+                            // still has to show that audio is arriving.
+                            mixer.take_arrival_peaks(),
+                        )
+                    })
+                    .unwrap_or((0, false, (0.0, 0.0)));
                 // `rate` is clamped to at least 1 where it is bound, so this cannot divide by zero.
                 let dropped_ms = dropped_frames * 1000 / rate;
                 let losing_audio = dropped_ms >= DROPPED_AUDIO_ALARM_MS;
@@ -981,6 +993,7 @@ fn spawn_writer(
 
                 if let Ok(mut status) = shared.status.lock() {
                     status.elapsed_ms = elapsed.as_millis() as u64;
+                    status.peak = mic_arrival.max(system_arrival);
                     status.dropped_ms = dropped_ms;
                     status.losing_audio = losing_audio;
                 }
