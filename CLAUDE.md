@@ -323,6 +323,34 @@ stretch of missing speech with nothing in the file to show it was ever captured.
 banner while it is happening, a warning at stop. Small amounts are normal — the mixer
 trims clock drift between two devices — so the alarm is a threshold, not any drop at all.
 
+### The transcript is readable before the pass finishes
+
+`faster-whisper` hands segments back on a lazy iterator, so each one exists the moment it
+is decoded rather than at the end of the pass. The sidecar emits every one on stderr as
+it arrives, and the detail pane shows them — there is no reason the first minute of an
+hour-long meeting should be unreadable while the last hour is still being decoded.
+
+**This does not make transcription live.** Nothing runs during a recording; §1's
+guarantee that audio reaches disk is worth more than a transcript arriving sooner, and a
+`faster-whisper` process takes every core it can get. The mixer's backlog cap is one
+second (`BACKLOG_SLACK_SECONDS`) and the writer loop wakes on a 100 ms sleep, so a
+starved writer drops audio **with no marker in the transcript** — and the reader threads
+starve first, blocking the helper in `write` where the loss happens inside Core Audio and
+is not even counted. Passes run after the recording stops, one at a time, as before.
+
+- **Streamed segments are not stored.** `replace_segments` at the end of a successful
+  pass is still the only write. Storing previews would mean clearing the existing rows
+  when a pass starts, and a pass that then failed would have destroyed a transcript that
+  was fine — a re-transcription that fails must leave the previous one in place.
+- **They are a preview of an unfinished result**, and the pane says so. The cross-channel
+  echo pass (§7) runs only once both channels are done, so a mic line shown while the
+  pass runs can still be dropped as an echo of the other party.
+- **A preview carries the channel in the database's terms**, translated where the channel
+  is known rather than left as the sidecar's `left`/`right`/`mono`. A line shown against
+  the wrong speaker would swap sides the moment the stored transcript replaced it.
+- **A malformed preview is a log line, not a failed pass.** The authoritative result is
+  still coming on stdout.
+
 ---
 
 ## 8a. Summaries
@@ -349,6 +377,26 @@ model reads and in rendered action items.
 
 Structure is enforced by a JSON schema on both providers, so summaries are never parsed
 out of prose.
+
+### A busy provider is a wait, not a rejection
+
+Both providers shed load, and they say so with a status: 503 from Gemini, 529 from
+Anthropic, 429 for a rate limit, 500/502/504 for their own faults. None of those is a
+verdict on the request, so **the request is sent up to three times with a doubling wait**
+before the failure is reported. Reported as a rejection instead, a one-second capacity
+blip reads as a bad key, a retired model, or something wrong with the recording.
+
+- **Only a busy response is retried.** Everything else is the provider's verdict on what
+  was sent, and a bad key or a retired model will be rejected identically however many
+  times it is sent.
+- **A timeout or a failed connection is deliberately not retried**, even though it might
+  well succeed. The provider may have received and processed that request, so sending it
+  again is a second upload of the transcript and a second charge on the user's key for an
+  answer that may already exist. A busy response is the provider's own word that it never
+  got that far.
+- **This is not a new outbound channel.** §1 allows exactly two, and this adds neither: it
+  is the same explicit press, sent again after the provider declined to handle it. Never
+  on a timer, never in the background.
 
 ---
 
@@ -379,6 +427,10 @@ Free text, not a schema: an answer is prose, and there is no structure to enforc
 Conversations are stored in `chat_messages` and deleted with the event. A question whose
 answer never arrives is **withdrawn** rather than left in place — kept, it would be
 replayed as history on every later question, sending the model a turn it never answered.
+
+The busy-provider retry in §8a applies here too, and matters more: a withdrawn question
+costs the user what they typed, so a capacity blip must not be what causes one. The
+question is still handed back to refill the box when a failure is real.
 
 ---
 
