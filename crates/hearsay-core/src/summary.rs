@@ -55,8 +55,22 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 /// again themselves is more honest than a spinner that keeps its reasons to itself.
 const SEND_ATTEMPTS: u32 = 3;
 
-/// How long to wait before the second attempt. Doubled for each one after it.
-const RETRY_BACKOFF: Duration = Duration::from_secs(2);
+/// How long to wait before the second attempt when the provider does not say. Doubled
+/// for each one after it.
+///
+/// Five, not the two it was: a capacity spike at either provider routinely outlasts the
+/// six seconds three attempts used to span, and giving up inside it reports an outage
+/// that has already passed. Where the provider names its own delay that is used instead
+/// — see `Busy::retry_after`.
+const RETRY_BACKOFF: Duration = Duration::from_secs(5);
+
+/// The longest wait a provider can ask for and be obeyed.
+///
+/// A provider under load sometimes names a delay in minutes. Honouring that would leave
+/// the user in front of a spinner with no way to tell it apart from a hang, and §8a's
+/// three attempts are meant to be a blip absorbed rather than a queue joined. Past this
+/// the wait is capped and, if the provider is still busy, reported.
+const MAX_ASKED_WAIT: Duration = Duration::from_secs(30);
 
 /// A provider that was too busy to look at the request.
 ///
@@ -70,6 +84,51 @@ pub struct Busy {
     pub provider: &'static str,
     pub status: u16,
     pub message: String,
+    /// How long the provider asked to be left alone, when it said.
+    ///
+    /// Both providers will name a delay — Anthropic in a `retry-after` header, Gemini in
+    /// a `RetryInfo` inside the error body — and it is the only party that knows how long
+    /// its own spike will last. Discarding it and waiting a fixed two seconds instead is
+    /// what had Hearsay give up after six seconds on an outage the provider had said to
+    /// come back to in twenty.
+    pub retry_after: Option<Duration>,
+}
+
+/// The delay a provider named in a `retry-after` header: `retry-after: 25`.
+///
+/// The HTTP-date form is deliberately not read: it is dated by the provider's clock, and
+/// a skewed one here would turn a short wait into a long one or none at all. Where
+/// neither this nor `asked_wait_body` finds a figure the doubling wait applies — a
+/// missing hint is not an error, it just means the provider did not say.
+pub(crate) fn asked_wait_header(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let seconds: f64 = headers.get("retry-after")?.to_str().ok()?.trim().parse().ok()?;
+    duration_from_seconds(seconds)
+}
+
+/// The delay a provider named in the error body. Google returns its as `error.details[]
+/// = { @type: ...RetryInfo, retryDelay: "25s" }` rather than as a header.
+pub(crate) fn asked_wait_body(body: &serde_json::Value) -> Option<Duration> {
+    let details = body.get("error")?.get("details")?.as_array()?;
+    for detail in details {
+        let kind = detail.get("@type").and_then(serde_json::Value::as_str).unwrap_or("");
+        if !kind.ends_with("RetryInfo") {
+            continue;
+        }
+        let delay = detail.get("retryDelay").and_then(serde_json::Value::as_str)?;
+        let seconds: f64 = delay.trim_end_matches('s').parse().ok()?;
+        return duration_from_seconds(seconds);
+    }
+    None
+}
+
+/// A wait only counts if it is positive and finite: a provider asking for zero or for
+/// something nonsensical is telling us nothing, and `Duration::from_secs_f64` panics on
+/// a negative or a NaN.
+fn duration_from_seconds(seconds: f64) -> Option<Duration> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(seconds))
 }
 
 /// Whether a status means "come back later" rather than "your request was wrong".
@@ -94,6 +153,18 @@ pub fn with_retry<T>(attempt: impl FnMut() -> Result<T>) -> Result<T> {
     retrying(RETRY_BACKOFF, attempt)
 }
 
+/// How long to wait before sending again: the provider's own figure where it gave one,
+/// capped, and the doubling wait where it did not.
+///
+/// The provider knows how long its own spike will last and this code does not, so its
+/// figure wins over the fallback even when it is the shorter of the two.
+fn next_wait(busy: &Busy, fallback: Duration) -> Duration {
+    match busy.retry_after {
+        Some(asked) => asked.min(MAX_ASKED_WAIT),
+        None => fallback,
+    }
+}
+
 /// The retry loop, with the first wait passed in so tests need not sit through it.
 fn retrying<T>(first_wait: Duration, mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
     let mut wait = first_wait;
@@ -108,21 +179,24 @@ fn retrying<T>(first_wait: Duration, mut attempt: impl FnMut() -> Result<T>) -> 
 
         // Anything else is the provider's verdict on the request, and sending it a
         // second time would only collect the same verdict.
-        if error.downcast_ref::<Busy>().is_none() {
+        let Some(busy) = error.downcast_ref::<Busy>() else {
             return Err(error);
-        }
+        };
 
         if sent >= SEND_ATTEMPTS {
             return Err(error.context(format!(
-                "gave up after {sent} attempts. Nothing was saved and the transcript and                  audio are untouched — try again in a minute"
+                "gave up after {sent} attempts. Nothing was saved and the transcript \
+                 and audio are untouched — try again in a minute"
             )));
         }
 
+        let this_wait = next_wait(busy, wait);
+
         tracing::warn!(
             "provider busy on attempt {sent} of {SEND_ATTEMPTS}, waiting {:?}: {error:#}",
-            wait
+            this_wait
         );
-        std::thread::sleep(wait);
+        std::thread::sleep(this_wait);
         wait *= 2;
     }
 }
@@ -280,6 +354,9 @@ fn summarize_anthropic(transcript: &str, model: &str, speaker: &str) -> Result<S
         .context("could not reach the Anthropic API")?;
 
     let status = response.status();
+    // Read before the body: `json()` consumes the response, and a `retry-after` lives up
+    // here.
+    let asked = asked_wait_header(response.headers());
     let body: serde_json::Value = response
         .json()
         .context("the Anthropic API returned a response that could not be read")?;
@@ -297,6 +374,7 @@ fn summarize_anthropic(transcript: &str, model: &str, speaker: &str) -> Result<S
                 provider: "the Anthropic API",
                 status: status.as_u16(),
                 message: message.to_string(),
+                retry_after: asked.or_else(|| asked_wait_body(&body)),
             }
             .into());
         }
@@ -377,6 +455,9 @@ fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summ
         .context("could not reach the Gemini API")?;
 
     let status = response.status();
+    // Read before the body: `json()` consumes the response, and a `retry-after` lives up
+    // here.
+    let asked = asked_wait_header(response.headers());
     let body: serde_json::Value = response
         .json()
         .context("the Gemini API returned a response that could not be read")?;
@@ -392,6 +473,7 @@ fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summ
                 provider: "the Gemini API",
                 status: status.as_u16(),
                 message: message.to_string(),
+                retry_after: asked.or_else(|| asked_wait_body(&body)),
             }
             .into());
         }
@@ -737,6 +819,7 @@ mod tests {
                     provider: "the Gemini API",
                     status: 503,
                     message: "high demand".to_string(),
+                    retry_after: None,
                 }
                 .into());
             }
@@ -770,6 +853,7 @@ mod tests {
                 provider: "the Gemini API",
                 status: 503,
                 message: "high demand".to_string(),
+                retry_after: None,
             }
             .into())
         });
@@ -781,6 +865,99 @@ mod tests {
         assert!(
             error.contains("untouched"),
             "and it should say nothing was lost: {error}"
+        );
+        assert!(
+            !error.contains("  "),
+            "and it should read as a sentence, not a wrapped literal: {error}"
+        );
+    }
+
+    /// A provider that names its own delay knows something this code does not. Ignoring
+    /// it is what had three attempts span six seconds against a spike the provider had
+    /// said to come back to later.
+    #[test]
+    fn a_provider_that_names_a_delay_is_taken_at_its_word() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "25".parse().expect("a valid header value"));
+        assert_eq!(
+            asked_wait_header(&headers),
+            Some(Duration::from_secs(25)),
+            "the header should be read"
+        );
+
+        let body = serde_json::json!({
+            "error": {
+                "code": 429,
+                "details": [
+                    { "@type": "type.googleapis.com/google.rpc.QuotaFailure" },
+                    {
+                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                        "retryDelay": "17s",
+                    },
+                ],
+            }
+        });
+        assert_eq!(
+            asked_wait_body(&body),
+            Some(Duration::from_secs(17)),
+            "Google's RetryInfo should be read too"
+        );
+    }
+
+    /// A provider that says nothing, or says something unusable, must leave the doubling
+    /// wait in place rather than collapse it to no wait at all.
+    #[test]
+    fn a_provider_that_names_nothing_usable_falls_back() {
+        let empty = reqwest::header::HeaderMap::new();
+        assert_eq!(asked_wait_header(&empty), None);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        // The HTTP-date form, deliberately not read: it is on the provider's clock.
+        headers.insert(
+            "retry-after",
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().expect("a valid header value"),
+        );
+        assert_eq!(asked_wait_header(&headers), None);
+
+        headers.insert("retry-after", "0".parse().expect("a valid header value"));
+        assert_eq!(asked_wait_header(&headers), None, "zero says nothing");
+
+        headers.insert("retry-after", "-5".parse().expect("a valid header value"));
+        assert_eq!(asked_wait_header(&headers), None, "and neither does a negative");
+
+        assert_eq!(asked_wait_body(&serde_json::json!({ "error": {} })), None);
+    }
+
+    /// The cap exists so a provider asking for minutes cannot leave the user in front of
+    /// a spinner indistinguishable from a hang.
+    #[test]
+    fn the_asked_wait_wins_over_the_fallback_but_not_over_the_cap() {
+        let busy = |retry_after| Busy {
+            provider: "the Gemini API",
+            status: 503,
+            message: "high demand".to_string(),
+            retry_after,
+        };
+
+        assert_eq!(
+            next_wait(&busy(None), Duration::from_secs(5)),
+            Duration::from_secs(5),
+            "a provider that said nothing leaves the doubling wait alone"
+        );
+        assert_eq!(
+            next_wait(&busy(Some(Duration::from_secs(20))), Duration::from_secs(5)),
+            Duration::from_secs(20),
+            "a provider that named a delay is waited out"
+        );
+        assert_eq!(
+            next_wait(&busy(Some(Duration::from_secs(1))), Duration::from_secs(5)),
+            Duration::from_secs(1),
+            "even when its figure is the shorter one"
+        );
+        assert_eq!(
+            next_wait(&busy(Some(Duration::from_secs(600))), Duration::from_secs(5)),
+            MAX_ASKED_WAIT,
+            "ten minutes asked for must not become ten minutes waited"
         );
     }
 

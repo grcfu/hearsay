@@ -389,6 +389,14 @@ blip reads as a bad key, a retired model, or something wrong with the recording.
 - **Only a busy response is retried.** Everything else is the provider's verdict on what
   was sent, and a bad key or a retired model will be rejected identically however many
   times it is sent.
+- **The provider's own figure decides the wait, where it gives one** — Anthropic in a
+  `retry-after` header, Gemini in a `RetryInfo` inside the error body. It is the only
+  party that knows how long its spike will last. Ignored, three attempts spanned six
+  seconds and reported an outage the provider had said to come back to in twenty. Capped
+  at 30 seconds, because a wait long enough to be indistinguishable from a hang is worse
+  than being told to try again; the doubling wait, starting at five seconds, applies when
+  the provider says nothing. A `retry-after` given as an HTTP date is not read: it is on
+  the provider's clock, and a skewed one would turn a short wait into a long one.
 - **A timeout or a failed connection is deliberately not retried**, even though it might
   well succeed. The provider may have received and processed that request, so sending it
   again is a second upload of the transcript and a second charge on the user's key for an

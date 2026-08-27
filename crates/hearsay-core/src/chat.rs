@@ -18,7 +18,8 @@
 use crate::db::Segment;
 use crate::secrets;
 use crate::summary::{
-    is_transient, render_transcript, speaker_or_default, with_retry, Busy, Marker, Provider,
+    asked_wait_body, asked_wait_header, is_transient, render_transcript, speaker_or_default,
+    with_retry, Busy, Marker, Provider,
     API_URL, API_VERSION, FALLBACK_BETA, GEMINI_URL,
 };
 
@@ -155,6 +156,9 @@ fn ask_anthropic(
         .context("could not reach the Anthropic API")?;
 
     let status = response.status();
+    // Read before the body: `json()` consumes the response, and a `retry-after` lives up
+    // here.
+    let asked = asked_wait_header(response.headers());
     let body: serde_json::Value = response
         .json()
         .context("the Anthropic API returned a response that could not be read")?;
@@ -171,6 +175,7 @@ fn ask_anthropic(
                 provider: "the Anthropic API",
                 status: status.as_u16(),
                 message: message.to_string(),
+                retry_after: asked.or_else(|| asked_wait_body(&body)),
             }
             .into());
         }
@@ -257,6 +262,9 @@ fn ask_gemini(
         .context("could not reach the Gemini API")?;
 
     let status = response.status();
+    // Read before the body: `json()` consumes the response, and a `retry-after` lives up
+    // here.
+    let asked = asked_wait_header(response.headers());
     let body: serde_json::Value = response
         .json()
         .context("the Gemini API returned a response that could not be read")?;
@@ -272,6 +280,7 @@ fn ask_gemini(
                 provider: "the Gemini API",
                 status: status.as_u16(),
                 message: message.to_string(),
+                retry_after: asked.or_else(|| asked_wait_body(&body)),
             }
             .into());
         }
