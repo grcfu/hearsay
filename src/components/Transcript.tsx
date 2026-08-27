@@ -46,7 +46,7 @@ export function Transcript({
   if (lines.length === 0) {
     return (
       <p className="muted">
-        No transcript yet. It appears here once transcription finishes.
+        No transcript yet. Lines appear here as transcription decodes them.
       </p>
     );
   }

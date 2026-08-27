@@ -38,6 +38,8 @@ interface TranscriptionEvent {
   segments?: number;
   /** How many passes are queued ahead of this one. Only on the "queued" stage. */
   ahead?: number;
+  /** One decoded line, on the "segment" stage. Not stored yet — see `live` below. */
+  segment?: Omit<Segment, "id" | "event_id">;
 }
 
 type Tab = "summary" | "transcript" | "ask" | "audio";
@@ -66,6 +68,11 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
   const [detail, setDetail] = useState<EventDetail | null>(null);
   const [tab, setTab] = useState<Tab>("transcript");
   const [progress, setProgress] = useState<TranscriptionEvent | null>(null);
+  // Lines decoded by a pass that has not finished. Held here rather than in the database:
+  // the stored transcript is only replaced once the whole pass succeeds, so a pass that
+  // fails leaves the previous one intact. Shown in place of the stored rows while a pass
+  // runs, which is what will happen to them for real when it finishes.
+  const [live, setLive] = useState<Segment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [playheadMs, setPlayheadMs] = useState<number | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -95,15 +102,36 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
   useEffect(() => {
     void load();
     setProgress(null);
+    setLive([]);
   }, [load]);
 
   // Transcription runs long after the recording stops, so the detail pane refreshes
   // itself when it finishes rather than making the user go and come back.
   useEffect(() => {
     const unlisten = listen<TranscriptionEvent>("transcription", (message) => {
-      if (message.payload.event_id !== eventId) return;
-      setProgress(message.payload);
-      if (message.payload.stage === "done") {
+      const payload = message.payload;
+      if (payload.event_id !== eventId) return;
+
+      // A decoded line, arriving while the pass runs. Deliberately does not touch
+      // `progress`: the percentage comes from its own events, which interleave with
+      // these, and letting a line overwrite it would stall the bar between them.
+      if (payload.stage === "segment") {
+        if (payload.segment) {
+          const decoded = payload.segment;
+          // Negative ids, so nothing can mistake one of these for a stored row. They
+          // exist only to key the list.
+          setLive((shown) => [
+            ...shown,
+            { ...decoded, id: -(shown.length + 1), event_id: payload.event_id },
+          ]);
+        }
+        return;
+      }
+
+      setProgress(payload);
+      // A pass starting over discards whatever the last one had shown.
+      if (payload.stage === "started") setLive([]);
+      if (payload.stage === "done") {
         void load();
         onChanged();
       }
@@ -155,6 +183,14 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
   }
 
   const { event, segments, mute_spans: muteSpans, capture_spans: captureSpans } = detail;
+
+  // While a pass is running, the lines it has decoded stand in for the stored ones — the
+  // same substitution the pass will make for real when it finishes. If it fails instead,
+  // this goes false and the previous transcript comes back, which is the truth: it is
+  // still the only one in the database.
+  const passRunning =
+    progress !== null && progress.stage !== "done" && progress.stage !== "failed";
+  const shownSegments = passRunning && live.length > 0 ? live : segments;
   const duration = event.ended_at
     ? new Date(event.ended_at).getTime() - new Date(event.started_at).getTime()
     : null;
@@ -235,6 +271,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
         <TranscriptionProgress
           progress={progress}
           channels={event.mode === "conversation" ? 2 : 1}
+          liveCount={passRunning ? live.length : 0}
         />
 
         {tab === "summary" ? (
@@ -248,7 +285,7 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
           />
         ) : tab === "transcript" ? (
           <Transcript
-            segments={segments}
+            segments={shownSegments}
             muteSpans={muteSpans}
             captureSpans={captureSpans}
             onSeek={seek}
@@ -309,9 +346,12 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
 function TranscriptionProgress({
   progress,
   channels,
+  liveCount,
 }: {
   progress: TranscriptionEvent | null;
   channels: number;
+  /** Lines decoded so far by the running pass. Zero when there is nothing to read yet. */
+  liveCount: number;
 }) {
   // How many channel passes have finished, so the bar keeps climbing across them.
   const [done, setDone] = useState(0);
@@ -386,6 +426,16 @@ function TranscriptionProgress({
           style={percent === null ? undefined : { width: `${percent}%` }}
         />
       </div>
+      {/* Said out loud, because a transcript that grows while a progress bar climbs
+          looks like it might be a partial view of a finished result. It is neither
+          finished nor final: the echo pass at the end can still remove lines. */}
+      {liveCount > 0 ? (
+        <div className="progress-note">
+          Readable in the transcript as it arrives — <span className="mono">{liveCount}</span>{" "}
+          {liveCount === 1 ? "line" : "lines"} so far, and still being checked against the
+          other channel.
+        </div>
+      ) : null}
     </div>
   );
 }
