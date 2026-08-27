@@ -49,6 +49,84 @@ const MAX_TOKENS: u32 = 16_000;
 /// transcript does not fail on a client-side timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How many times a request is sent before a busy provider is reported as a failure.
+///
+/// Three, not more: past that the user is waiting long enough that being told to try
+/// again themselves is more honest than a spinner that keeps its reasons to itself.
+const SEND_ATTEMPTS: u32 = 3;
+
+/// How long to wait before the second attempt. Doubled for each one after it.
+const RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+/// A provider that was too busy to look at the request.
+///
+/// Its own kind of error because it is the only kind worth sending again: it says
+/// nothing about the request, so the same one is likely to succeed a moment later. A
+/// rejected request — a bad key, a retired model, a transcript too long — will be
+/// rejected identically however many times it is sent.
+#[derive(Debug, thiserror::Error)]
+#[error("{provider} is too busy to answer right now ({status}): {message}")]
+pub struct Busy {
+    pub provider: &'static str,
+    pub status: u16,
+    pub message: String,
+}
+
+/// Whether a status means "come back later" rather than "your request was wrong".
+///
+/// 503 and Anthropic's 529 are the provider out of capacity, 429 is a rate limit, and
+/// 500/502/504 are its own faults. None of them are a verdict on what was sent.
+pub fn is_transient(status: u16) -> bool {
+    matches!(status, 429 | 500 | 502 | 503 | 504 | 529)
+}
+
+/// Sends a request, trying again while the provider says it is too busy.
+///
+/// **Only a `Busy` is retried.** A request that timed out or could not connect is not,
+/// even though it may well succeed on a second try: the provider may have received and
+/// processed the first one, and sending the transcript out again for an answer that may
+/// already exist is both a second upload and a second charge on the user's key. A
+/// `Busy` carries the provider's own word that it did not get that far.
+///
+/// This adds no outbound trigger. It is the same explicit press, sent again after the
+/// provider declined to handle it.
+pub fn with_retry<T>(attempt: impl FnMut() -> Result<T>) -> Result<T> {
+    retrying(RETRY_BACKOFF, attempt)
+}
+
+/// The retry loop, with the first wait passed in so tests need not sit through it.
+fn retrying<T>(first_wait: Duration, mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut wait = first_wait;
+    let mut sent = 0u32;
+
+    loop {
+        sent += 1;
+        let error = match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+
+        // Anything else is the provider's verdict on the request, and sending it a
+        // second time would only collect the same verdict.
+        if error.downcast_ref::<Busy>().is_none() {
+            return Err(error);
+        }
+
+        if sent >= SEND_ATTEMPTS {
+            return Err(error.context(format!(
+                "gave up after {sent} attempts. Nothing was saved and the transcript and                  audio are untouched — try again in a minute"
+            )));
+        }
+
+        tracing::warn!(
+            "provider busy on attempt {sent} of {SEND_ATTEMPTS}, waiting {:?}: {error:#}",
+            wait
+        );
+        std::thread::sleep(wait);
+        wait *= 2;
+    }
+}
+
 /// A generated summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Summary {
@@ -152,8 +230,8 @@ pub fn summarize(
     }
 
     match Provider::current() {
-        Provider::Anthropic => summarize_anthropic(&transcript, model, speaker),
-        Provider::Gemini => summarize_gemini(&transcript, model, speaker),
+        Provider::Anthropic => with_retry(|| summarize_anthropic(&transcript, model, speaker)),
+        Provider::Gemini => with_retry(|| summarize_gemini(&transcript, model, speaker)),
     }
 }
 
@@ -214,6 +292,14 @@ fn summarize_anthropic(transcript: &str, model: &str, speaker: &str) -> Result<S
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("no detail given");
+        if is_transient(status.as_u16()) {
+            return Err(Busy {
+                provider: "the Anthropic API",
+                status: status.as_u16(),
+                message: message.to_string(),
+            }
+            .into());
+        }
         return Err(anyhow!("the Anthropic API rejected the request ({status}): {message}"));
     }
 
@@ -301,6 +387,14 @@ fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summ
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("no detail given");
+        if is_transient(status.as_u16()) {
+            return Err(Busy {
+                provider: "the Gemini API",
+                status: status.as_u16(),
+                message: message.to_string(),
+            }
+            .into());
+        }
         if status.as_u16() == 404 {
             return Err(anyhow!(
                 "Gemini does not offer the model {model} to this key ({message}). \
@@ -615,6 +709,81 @@ fn clock(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// 503 is what Gemini returns when it is out of capacity, and 529 is Anthropic's.
+    /// Neither is a verdict on the request, so neither should read as a rejection.
+    #[test]
+    fn a_busy_provider_is_told_apart_from_a_rejected_request() {
+        for status in [429, 500, 502, 503, 504, 529] {
+            assert!(is_transient(status), "{status} should be worth trying again");
+        }
+        for status in [400, 401, 403, 404, 413, 422] {
+            assert!(
+                !is_transient(status),
+                "{status} is a verdict on the request and must not be resent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_that_is_busy_once_is_tried_again() {
+        let sent = Cell::new(0u32);
+        let outcome = retrying(Duration::ZERO, || {
+            sent.set(sent.get() + 1);
+            if sent.get() == 1 {
+                return Err(Busy {
+                    provider: "the Gemini API",
+                    status: 503,
+                    message: "high demand".to_string(),
+                }
+                .into());
+            }
+            Ok("summary")
+        });
+
+        assert_eq!(outcome.expect("the second attempt should have landed"), "summary");
+        assert_eq!(sent.get(), 2, "it should have been sent exactly twice");
+    }
+
+    /// A rejection resent is the same rejection, and the request carries the transcript —
+    /// so sending it again would upload it a second time for an answer already known.
+    #[test]
+    fn a_rejected_request_is_not_sent_again() {
+        let sent = Cell::new(0u32);
+        let outcome: Result<()> = retrying(Duration::ZERO, || {
+            sent.set(sent.get() + 1);
+            Err(anyhow!("the Gemini API rejected the request (401): bad key"))
+        });
+
+        assert!(outcome.is_err());
+        assert_eq!(sent.get(), 1, "a rejection must be reported, not retried");
+    }
+
+    #[test]
+    fn a_provider_that_stays_busy_is_reported_with_what_it_said() {
+        let sent = Cell::new(0u32);
+        let outcome: Result<()> = retrying(Duration::ZERO, || {
+            sent.set(sent.get() + 1);
+            Err(Busy {
+                provider: "the Gemini API",
+                status: 503,
+                message: "high demand".to_string(),
+            }
+            .into())
+        });
+
+        let error = format!("{:#}", outcome.expect_err("it never succeeded"));
+        assert_eq!(sent.get(), SEND_ATTEMPTS, "it should stop after SEND_ATTEMPTS");
+        assert!(error.contains("503"), "the status should survive: {error}");
+        assert!(error.contains("high demand"), "so should the provider's words: {error}");
+        assert!(
+            error.contains("untouched"),
+            "and it should say nothing was lost: {error}"
+        );
+    }
+
     use super::*;
 
     fn segment(id: i64, channel: &str, start_ms: i64, text: &str) -> Segment {
