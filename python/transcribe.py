@@ -9,6 +9,11 @@ the same way:
     stdout   one JSON object, the final result, printed once at the end
     stderr   one JSON object per line, progress events, each with a "type"
 
+Segments are reported twice over, and deliberately: once on stderr as each is decoded,
+so the transcript can be read while the pass is still running, and once on stdout at the
+end as the authoritative result. The stdout object is the one to store — the streamed
+copies have not been through the cross-channel echo pass yet.
+
 Everything runs on this machine. The single exception is the first run for a given
 model, which downloads weights from Hugging Face into --models-dir; that download emits
 progress events and is never silent. After it completes, transcription needs no network.
@@ -257,7 +262,19 @@ def read_channel(path: str, channel: str):
 
 
 def transcribe_channel(model, samples, duration_seconds: float, channel: str, language):
-    """Runs the model and returns segments, reporting progress as it goes."""
+    """Runs the model and returns segments, reporting each one as it is produced.
+
+    faster-whisper hands back a lazy iterator: the model is still running while it is
+    being consumed, so every segment is available the moment it is decoded rather than
+    at the end of the pass. Each is emitted on stderr as it arrives, which is what lets
+    the transcript fill in from 0:00 while the rest of the meeting is still being
+    decoded — a long recording is readable from the top in seconds instead of minutes.
+
+    The stdout result stays authoritative and unchanged. These events are a preview:
+    the caller has cross-channel work to do once both passes finish (dropping mic
+    segments that are echoes of the other party), so some of what is streamed here will
+    not survive into the stored transcript.
+    """
     emit("transcribe_start", channel=channel, duration_seconds=round(duration_seconds, 3))
 
     segments_iter, info = model.transcribe(
@@ -276,14 +293,14 @@ def transcribe_channel(model, samples, duration_seconds: float, channel: str, la
     for segment in segments_iter:
         text = segment.text.strip()
         if text:
-            results.append(
-                Segment(
-                    start_ms=int(round(segment.start * 1000)),
-                    end_ms=int(round(segment.end * 1000)),
-                    text=text,
-                    channel=channel,
-                )
+            decoded = Segment(
+                start_ms=int(round(segment.start * 1000)),
+                end_ms=int(round(segment.end * 1000)),
+                text=text,
+                channel=channel,
             )
+            results.append(decoded)
+            emit("segment", **asdict(decoded))
         if duration_seconds > 0:
             percent = int(min(segment.end / duration_seconds, 1.0) * 100)
             if percent != last_percent:
