@@ -18,8 +18,8 @@
 use crate::db::Segment;
 use crate::secrets;
 use crate::summary::{
-    render_transcript, speaker_or_default, Marker, Provider, API_URL, API_VERSION,
-    FALLBACK_BETA, GEMINI_URL,
+    is_transient, render_transcript, speaker_or_default, with_retry, Busy, Marker, Provider,
+    API_URL, API_VERSION, FALLBACK_BETA, GEMINI_URL,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -91,9 +91,16 @@ pub fn ask(
         ));
     }
 
+    // Retried while the provider says it is too busy, for the reason it is on the summary
+    // path — and more sharply here, because a question that fails is withdrawn (§8b) and
+    // the person is sitting in front of the box waiting for an answer.
     match Provider::current() {
-        Provider::Anthropic => ask_anthropic(&transcript, history, question, model, speaker),
-        Provider::Gemini => ask_gemini(&transcript, history, question, model, speaker),
+        Provider::Anthropic => {
+            with_retry(|| ask_anthropic(&transcript, history, question, model, speaker))
+        }
+        Provider::Gemini => {
+            with_retry(|| ask_gemini(&transcript, history, question, model, speaker))
+        }
     }
 }
 
@@ -159,6 +166,14 @@ fn ask_anthropic(
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("no detail given");
+        if is_transient(status.as_u16()) {
+            return Err(Busy {
+                provider: "the Anthropic API",
+                status: status.as_u16(),
+                message: message.to_string(),
+            }
+            .into());
+        }
         return Err(anyhow!("the Anthropic API rejected the question ({status}): {message}"));
     }
 
@@ -252,6 +267,14 @@ fn ask_gemini(
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("no detail given");
+        if is_transient(status.as_u16()) {
+            return Err(Busy {
+                provider: "the Gemini API",
+                status: status.as_u16(),
+                message: message.to_string(),
+            }
+            .into());
+        }
         if status.as_u16() == 404 {
             return Err(anyhow!(
                 "Gemini does not offer the model {model} to this key ({message}). \
