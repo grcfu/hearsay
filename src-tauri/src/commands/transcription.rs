@@ -5,6 +5,14 @@
 //! and writes segments when it finishes. Nothing about the app is blocked while it runs,
 //! and a failure leaves the recording itself untouched.
 //!
+//! **Segments are reported as they are decoded, and stored only at the end.** The pass
+//! takes minutes on a long meeting, and there is no reason the first minute of the
+//! transcript should be unreadable while the last hour is still being decoded — so each
+//! segment goes to the UI as it arrives. The database write stays exactly where it was:
+//! one `replace_segments` once both channels are done and the echo pass has run. What is
+//! streamed is a preview of a result that has not been finished yet, and some of it — mic
+//! lines that turn out to be echoes of the other party — will not survive into the store.
+//!
 //! **One pass at a time.** Each pass runs a `faster-whisper` process that will use every
 //! core it can get. Two of them alongside a live recording starve the writer thread, and
 //! audio the mixer has to drop is gone with no marker in the transcript — a worse outcome
@@ -201,6 +209,21 @@ fn run(
             TranscribeEvent::Progress { channel, percent } => serde_json::json!({
                 "event_id": event_id, "stage": "transcribing",
                 "channel": channel, "percent": percent,
+            }),
+            // Forwarded, not stored. Writing previews as they arrive would mean clearing
+            // the existing rows when a pass starts, and a pass that then failed would
+            // have destroyed a transcript that was perfectly good — `retranscribe`
+            // leaving the old one in place on failure is worth more than a partial
+            // transcript surviving a switch between recordings. `replace_segments` below
+            // is still the only write.
+            TranscribeEvent::Segment(segment) => serde_json::json!({
+                "event_id": event_id, "stage": "segment",
+                "segment": {
+                    "channel": segment.channel,
+                    "start_ms": segment.start_ms,
+                    "end_ms": segment.end_ms,
+                    "text": segment.text,
+                },
             }),
             TranscribeEvent::Done { channel, segments } => serde_json::json!({
                 "event_id": event_id, "stage": "channel_done",

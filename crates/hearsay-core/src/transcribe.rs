@@ -83,6 +83,14 @@ pub enum TranscribeEvent {
     DownloadDone,
     ModelReady,
     Progress { channel: String, percent: u8 },
+    /// One decoded segment, reported while the pass is still running.
+    ///
+    /// A preview, not a result. The stored transcript comes from the value
+    /// [`transcribe_recording`] returns, which has been through the cross-channel echo
+    /// pass; a mic segment streamed here may be dropped from it as an echo of the other
+    /// party. Its `channel` is already in database terms, so what is shown while the
+    /// pass runs attributes a line to the same speaker the stored transcript will.
+    Segment(TranscriptSegment),
     Done { channel: String, segments: usize },
     Error { kind: String, message: String },
     Log { line: String },
@@ -172,7 +180,9 @@ pub fn transcribe_channel(
         .spawn()
         .with_context(|| format!("could not start {}", paths.script.display()))?;
 
-    let output = drain_sidecar(child, &mut on_event)?;
+    let output = drain_sidecar(child, |event| {
+        on_event(in_database_terms(event, channel))
+    })?;
 
     if !output.status.success() {
         if let Some((kind, message)) = output.last_error {
@@ -191,6 +201,24 @@ pub fn transcribe_channel(
     }
 
     serde_json::from_str(trimmed).with_context(|| "could not parse the transcription result")
+}
+
+/// Renames a streamed segment's channel from the sidecar's terms to the database's.
+///
+/// The sidecar reports the channel it was asked for — `left`, `right`, `mono`. The
+/// database records who was speaking — `mic`, `system`. Translated here because this is
+/// where the channel is known, and it has to match: a line shown against the wrong
+/// speaker while the pass runs would swap sides once the stored transcript replaced it.
+///
+/// Every other event passes through untouched.
+fn in_database_terms(event: TranscribeEvent, channel: Channel) -> TranscribeEvent {
+    match event {
+        TranscribeEvent::Segment(mut segment) => {
+            segment.channel = channel.db_channel().to_string();
+            TranscribeEvent::Segment(segment)
+        }
+        other => other,
+    }
 }
 
 /// Everything a finished sidecar produced.
@@ -340,6 +368,14 @@ fn parse_event(line: &str) -> TranscribeEvent {
             channel: text("channel"),
             percent: percent("percent"),
         },
+        "segment" => match serde_json::from_value::<TranscriptSegment>(value.clone()) {
+            Ok(segment) => TranscribeEvent::Segment(segment),
+            // A malformed preview is not worth failing a pass over: the authoritative
+            // result is still coming on stdout. Logged so it is not simply swallowed.
+            Err(_) => TranscribeEvent::Log {
+                line: trimmed.to_string(),
+            },
+        },
         "transcribe_done" => TranscribeEvent::Done {
             channel: text("channel"),
             segments: value
@@ -382,6 +418,53 @@ mod tests {
             }
             other => panic!("expected download progress, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_streamed_segment_is_parsed() {
+        let event = parse_event(
+            r#"{"type":"segment","start_ms":1200,"end_ms":3400,"text":"hello","channel":"left"}"#,
+        );
+        match event {
+            TranscribeEvent::Segment(segment) => {
+                assert_eq!(segment.start_ms, 1200);
+                assert_eq!(segment.end_ms, 3400);
+                assert_eq!(segment.text, "hello");
+            }
+            other => panic!("expected a segment, got {other:?}"),
+        }
+    }
+
+    /// A preview shown against the wrong speaker would swap sides the moment the stored
+    /// transcript replaced it, which reads as the app changing its mind about who spoke.
+    #[test]
+    fn a_streamed_segment_is_attributed_as_the_stored_one_will_be() {
+        let streamed = parse_event(
+            r#"{"type":"segment","start_ms":0,"end_ms":10,"text":"hi","channel":"left"}"#,
+        );
+        match in_database_terms(streamed, Channel::Left) {
+            TranscribeEvent::Segment(segment) => assert_eq!(segment.channel, "mic"),
+            other => panic!("expected a segment, got {other:?}"),
+        }
+
+        let streamed = parse_event(
+            r#"{"type":"segment","start_ms":0,"end_ms":10,"text":"hi","channel":"left"}"#,
+        );
+        match in_database_terms(streamed, Channel::Mono) {
+            TranscribeEvent::Segment(segment) => assert_eq!(segment.channel, "system"),
+            other => panic!("expected a segment, got {other:?}"),
+        }
+    }
+
+    /// The authoritative result is still coming on stdout, so a preview that cannot be
+    /// read is worth a log line and nothing more.
+    #[test]
+    fn a_malformed_segment_does_not_fail_the_pass() {
+        let event = parse_event(r#"{"type":"segment","text":"no times at all"}"#);
+        assert!(
+            matches!(event, TranscribeEvent::Log { .. }),
+            "a segment missing its times should degrade to a log line, got {event:?}"
+        );
     }
 
     #[test]
