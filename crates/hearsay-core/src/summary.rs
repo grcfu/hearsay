@@ -344,11 +344,33 @@ pub struct ActionItem {
     pub owner: String,
 }
 
+/// Repairs a body whose line breaks arrived escaped.
+///
+/// Both providers are asked for JSON against a schema, and a model occasionally writes
+/// the escape itself — emitting the two characters `\` and `n` inside the JSON string
+/// value. Those survive decoding as those same two characters instead of becoming a line
+/// break, and the markdown then renders as one unbroken paragraph: every heading, bullet
+/// and blank line is a line-start construct, so all of them vanish at once. Nothing is
+/// missing from the summary, but none of its structure is left.
+///
+/// Only applied when the text holds no real line break at all, which is the signature of
+/// a whole body escaped in one go. A body with real newlines is left exactly as the model
+/// wrote it: a stray `\n` inside otherwise well-formed markdown is likelier to be
+/// something that was said than a mistake to correct, and §8a's rule is that garbled
+/// output is reported rather than silently rewritten. This is a decoding repair, not a
+/// judgement about content.
+fn repair_escaped_newlines(text: &str) -> String {
+    if text.contains('\n') || !text.contains("\\n") {
+        return text.to_string();
+    }
+    text.replace("\\r\\n", "\n").replace("\\n", "\n")
+}
+
 impl Summary {
     /// The full markdown to store, with action items appended as a section.
     pub fn to_markdown(&self, speaker: Option<&str>) -> String {
         let speaker = speaker_or_default(speaker);
-        let mut markdown = self.summary_md.trim().to_string();
+        let mut markdown = repair_escaped_newlines(self.summary_md.trim());
         if self.action_items.is_empty() {
             return markdown;
         }
@@ -1084,6 +1106,45 @@ mod tests {
         assert_eq!(asked_wait_header(&headers), None, "and neither does a negative");
 
         assert_eq!(asked_wait_body(&serde_json::json!({ "error": {} })), None);
+    }
+
+    /// A model that escapes its own newlines inside the JSON leaves a summary with every
+    /// heading and bullet intact and none of them rendering — one paragraph instead.
+    #[test]
+    fn a_body_whose_newlines_arrived_escaped_is_repaired() {
+        let summary = Summary {
+            title: "Abridge".to_string(),
+            summary_md: "## Logistics\\n\\n* Twelve weeks\\n* In San Francisco".to_string(),
+            action_items: Vec::new(),
+        };
+
+        let markdown = summary.to_markdown(None);
+        assert_eq!(
+            markdown, "## Logistics\n\n* Twelve weeks\n* In San Francisco",
+            "the escapes should have become line breaks"
+        );
+        assert!(
+            !markdown.contains("\\n"),
+            "no literal escape should survive: {markdown}"
+        );
+    }
+
+    /// A body the model formatted properly is not touched — including one that happens to
+    /// contain a backslash-n, which is likelier to be something that was said.
+    #[test]
+    fn a_body_with_real_line_breaks_is_left_alone() {
+        let spoken = "## Notes\n\n* They typed \\n to mean a newline\n";
+        let summary = Summary {
+            title: "t".to_string(),
+            summary_md: spoken.to_string(),
+            action_items: Vec::new(),
+        };
+
+        assert_eq!(
+            summary.to_markdown(None),
+            spoken.trim(),
+            "a well-formed body must survive untouched"
+        );
     }
 
     /// The failure that started this: Gemini sheds load on a newly released model as a

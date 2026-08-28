@@ -166,6 +166,38 @@ const MIGRATIONS: &[&str] = &[
 
     CREATE INDEX idx_capture_spans_event ON capture_spans(event_id, start_ms);
     "#,
+    // Repairs summaries whose line breaks were stored escaped.
+    //
+    // A model asked for JSON against a schema sometimes writes the escape itself,
+    // emitting the two characters `\` and `n` inside the string value. They decode as
+    // those two characters rather than as a line break, and the summary then renders as
+    // one unbroken paragraph — every heading, bullet and blank line is a line-start
+    // construct, so all of them are lost at once. `summary::repair_escaped_newlines` now
+    // catches this on the way in; this is for the rows written before it did.
+    //
+    // Repaired rather than regenerated: the text is all there and only its line breaks
+    // were mangled, so this is a decoding fix that needs no API call, no key, and no
+    // second upload of the transcript. Regenerating would also produce a different
+    // summary, and §8 makes segments the source of truth precisely so derived text can be
+    // rebuilt — not so it gets rebuilt when a repair will do.
+    //
+    // The Rust guard — "no real newline anywhere" — cannot be reused here. By the time a
+    // summary is stored it has had the action items appended with real line breaks, so an
+    // affected row holds both: an escaped body and a well-formed tail. Guarding on the
+    // absence of real newlines would skip exactly the rows that need repairing.
+    //
+    // So the guard is the escape sitting where a line-start construct belongs: a blank
+    // line, a heading, or a bullet. That is the signature of lost structure, and it is
+    // narrower than "contains a backslash-n" — a summary quoting one in passing keeps it.
+    r#"
+    UPDATE events
+       SET summary_md = replace(summary_md, '\n', char(10))
+     WHERE summary_md IS NOT NULL
+       AND (   summary_md LIKE '%\n\n%'
+            OR summary_md LIKE '%\n#%'
+            OR summary_md LIKE '%\n*%'
+            OR summary_md LIKE '%\n-%');
+    "#,
 ];
 
 /// A recording session and everything known about it.
@@ -1101,6 +1133,55 @@ mod tests {
         assert!(
             !event.audio_was_deleted(),
             "no audio is not the same as audio thrown away"
+        );
+    }
+
+    /// A summary stored with its line breaks escaped renders as one paragraph. The text
+    /// is all there, so it is repaired in place rather than regenerated — no API call, no
+    /// second upload of the transcript, and no different summary.
+    #[test]
+    fn the_migration_repairs_summaries_whose_line_breaks_were_escaped() {
+        let db = Database::open_in_memory().expect("in-memory database opens");
+
+        // As it was stored: an escaped body, then action items with real line breaks.
+        let escaped = "## Logistics\\n\\n* Twelve weeks\n\n## Action items\n\n- **You** — Reply\n";
+        let broken = db
+            .create_event("Abridge", "listen_only", Utc::now(), None, None)
+            .expect("an event");
+        db.set_summary(broken, escaped, Some("Abridge"), "gemini-3.5-flash")
+            .expect("the summary stores");
+
+        // A well-formed summary that mentions a backslash-n must survive untouched.
+        let intact = "## Notes\n\n* They typed \\n to mean a newline\n";
+        let fine = db
+            .create_event("Other", "listen_only", Utc::now(), None, None)
+            .expect("an event");
+        db.set_summary(fine, intact, Some("Other"), "gemini-3.5-flash")
+            .expect("the summary stores");
+
+        let migration = MIGRATIONS.last().expect("there is a last migration");
+        db.with_connection(|connection| {
+            connection.execute_batch(migration)?;
+            Ok(())
+        })
+        .expect("the repair applies");
+
+        let repaired = db.event(broken).expect("the event is there").expect("a row");
+        let summary = repaired.summary_md.expect("a summary");
+        assert!(
+            summary.starts_with("## Logistics\n\n* Twelve weeks"),
+            "the escapes should have become line breaks: {summary:?}"
+        );
+        assert!(
+            summary.contains("## Action items"),
+            "and the tail should still be there: {summary:?}"
+        );
+
+        let untouched = db.event(fine).expect("the event is there").expect("a row");
+        assert_eq!(
+            untouched.summary_md.as_deref(),
+            Some(intact),
+            "a well-formed summary must not be rewritten"
         );
     }
 

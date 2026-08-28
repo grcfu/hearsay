@@ -378,6 +378,18 @@ model reads and in rendered action items.
 Structure is enforced by a JSON schema on both providers, so summaries are never parsed
 out of prose.
 
+**A body whose line breaks arrived escaped is repaired.** A model asked for JSON against
+a schema sometimes writes the escape itself, emitting the two characters `\` and `n`
+inside the string value; they decode as those two characters rather than as a line break,
+and the summary renders as one unbroken paragraph — every heading, bullet and blank line
+is a line-start construct, so all of them are lost at once. Repaired only when the body
+holds no real line break, which is the signature of a whole body escaped in one go: a
+`\n` inside otherwise well-formed markdown is likelier to be something that was said,
+and this is a decoding fix rather than a judgement about content. Rows written before the
+repair existed are fixed by migration rather than regenerated — the text is all there, so
+it needs no API call, no key, and no second upload of the transcript, and a regenerated
+summary would not be the same one.
+
 ### The model is a list, not a name
 
 Naming one Gemini model fails in both available directions, so Hearsay tries several in
