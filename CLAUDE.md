@@ -419,6 +419,29 @@ When nothing answers, **the failure names every model tried.** Told only about t
 an out-of-capacity provider reads as one broken model, and the user goes looking for a
 setting to change instead of waiting.
 
+### What a summary pass can honestly report
+
+**Elapsed time, not a percentage.** Transcription has a real progress bar because it
+decodes a known number of seconds of audio and can say how far it has got. A summary is
+one request: it is sent, and then an answer comes back or it does not. There is no
+intermediate signal to draw a bar from, and drawing one anyway would be inventing a
+position — the same class of lie as a seek button that does nothing when pressed. So what
+is shown is what is true: that it is still running, for how long, and, past 45 seconds,
+that there is nothing further to report from a single request. A wait being sat out is
+named as one (§8a).
+
+**The pass outlives the tab.** The state and the listener live in the detail pane, beside
+transcription's, and the strip renders above the tab body — a summary started and then
+looked away from used to finish into nothing, because the listener was torn down with the
+tab and no refresh ever ran. A pass is cleared when the selected recording changes, so
+one recording's elapsed time is never shown against another's summary.
+
+**A pass that outran the window is notified**, using the same desktop notification the
+silent-recording warning uses, and only past 20 seconds — below that the window was
+almost certainly still being watched, and announcing something the user just saw happen
+is noise. A missing notification permission is survivable and silent: the pane says the
+same thing on screen.
+
 ### A busy provider is a wait, not a rejection
 
 Both providers shed load, and they say so with a status: 503 from Gemini, 529 from

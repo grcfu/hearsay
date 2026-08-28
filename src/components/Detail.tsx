@@ -2,6 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask, save } from "@tauri-apps/plugin-dialog";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { Transcript } from "./Transcript";
 import { AskTab } from "./AskTab";
 import {
@@ -57,6 +62,76 @@ interface Props {
   onChanged: () => void;
 }
 
+/** How long a summary must run before finishing it is worth a notification. Below this
+ *  the window was almost certainly still being watched, and a banner for something the
+ *  user just saw happen is noise. */
+const NOTIFY_AFTER_MS = 20_000;
+
+/** How long before the wait is worth explaining rather than just counting. */
+const SLOW_AFTER_MS = 45_000;
+
+/** Sends a desktop notification, asking for permission the first time.
+ *
+ *  Failure is survivable and deliberately silent: the pane says the same thing on screen,
+ *  and a recorder that nags about notification permission it does not need is worse than
+ *  one that quietly does without. */
+async function notify(title: string, body: string) {
+  try {
+    let allowed = await isPermissionGranted();
+    if (!allowed) allowed = (await requestPermission()) === "granted";
+    if (allowed) sendNotification({ title, body });
+  } catch {
+    // Nothing to do — the window already says it.
+  }
+}
+
+/**
+ * What a summary pass can honestly report.
+ *
+ * Not a percentage, and not a bar. A summary is one request: it is sent, and then either
+ * an answer comes back or it does not. There is no intermediate signal to draw a bar
+ * from, and drawing one anyway would be inventing a position — the same class of lie as a
+ * seek button that does nothing. Transcription has a real bar because it decodes a known
+ * number of seconds of audio and says how far it has got.
+ *
+ * So what is shown is what is true: that it is still going, for how long, and — when a
+ * provider is shedding load — that it is being waited out and for how much longer.
+ */
+function SummaryProgress({ run }: { run: SummaryRun | null }) {
+  if (run === null) return null;
+  const elapsed = Date.now() - run.startedAt;
+
+  return (
+    <div className="banner" style={{ marginBottom: 14 }}>
+      <span>
+        Writing the summary… <span className="mono">{formatClock(elapsed)}</span>
+        {run.waiting ? (
+          <>
+            {" "}
+            The provider is busy; trying again in {run.waiting.seconds}s — attempt{" "}
+            {run.waiting.attempt + 1} of {run.waiting.of}.
+          </>
+        ) : elapsed >= SLOW_AFTER_MS ? (
+          <>
+            {" "}
+            Still waiting on the provider. There is no progress to report from a single
+            request — you can leave this tab, and Hearsay will notify you when it lands.
+          </>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+/** A summary pass in flight. */
+interface SummaryRun {
+  /** `Date.now()` when the press happened, so the elapsed time is real rather than a tick
+   *  count that stalls whenever the tab is hidden. */
+  startedAt: number;
+  /** Set while a busy provider is being waited out (§8a), so the delay is explained. */
+  waiting: { attempt: number; of: number; seconds: number } | null;
+}
+
 /**
  * Pane three: one recording, with its summary, transcript, and audio as peer tabs.
  *
@@ -74,9 +149,19 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
   // runs, which is what will happen to them for real when it finishes.
   const [live, setLive] = useState<Segment[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // The summary pass lives here rather than inside the tab, for the reason the
+  // transcription pass does: the tabs unmount when another is selected, and a listener
+  // that goes with them misses the result. A summary started and then looked away from
+  // used to finish into nothing — no refresh, no state, nothing to say it had ever run.
+  const [summaryRun, setSummaryRun] = useState<SummaryRun | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [playheadMs, setPlayheadMs] = useState<number | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  /** When the running pass started. A ref because the listener below reads it from a
+   *  closure made once per subscription, where the state would always be its initial
+   *  value — and an elapsed time of zero would silence the notification entirely. */
+  const startedAtRef = useRef<number | null>(null);
 
   // Which provider is configured, and what to call the recorder. Read once: both are
   // changed from Settings, which is a different view entirely.
@@ -141,12 +226,91 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
     };
   }, [eventId, load, onChanged]);
 
+  // The summary pass, listened for here for the same reason: it outlives the tab.
+  useEffect(() => {
+    const unlisten = listen<{
+      event_id: number;
+      stage: string;
+      message?: string;
+      attempt?: number;
+      of?: number;
+      seconds?: number;
+    }>("summary", (message) => {
+      const payload = message.payload;
+      if (payload.event_id !== eventId) return;
+
+      if (payload.stage === "started") {
+        setSummaryError(null);
+        startedAtRef.current = Date.now();
+        setSummaryRun({ startedAt: startedAtRef.current, waiting: null });
+        return;
+      }
+      if (payload.stage === "waiting") {
+        setSummaryRun((run) =>
+          run === null
+            ? run
+            : {
+                ...run,
+                waiting: {
+                  attempt: payload.attempt ?? 1,
+                  of: payload.of ?? 1,
+                  seconds: payload.seconds ?? 0,
+                },
+              },
+        );
+        return;
+      }
+      if (payload.stage === "done" || payload.stage === "failed") {
+        const failed = payload.stage === "failed";
+        // Only when it ran long enough to have been looked away from. A notification for
+        // something that finished while the window was still being watched is noise.
+        const startedAt = startedAtRef.current;
+        const elapsed = startedAt === null ? 0 : Date.now() - startedAt;
+        startedAtRef.current = null;
+        if (elapsed >= NOTIFY_AFTER_MS) {
+          void notify(
+            failed ? "The summary could not be written" : "The summary is ready",
+            failed
+              ? (payload.message ?? "Open Hearsay to see what happened.")
+              : (detail?.event.title ?? "Open Hearsay to read it."),
+          );
+        }
+        setSummaryRun(null);
+        if (failed) setSummaryError(payload.message ?? "Summary failed.");
+        else {
+          void load();
+          onChanged();
+        }
+      }
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [eventId, load, onChanged, detail?.event.title]);
+
+  // Ticks once a second while a pass runs, so the elapsed time on screen moves. Nothing
+  // subscribes when nothing is running.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (summaryRun === null) return;
+    const timer = window.setInterval(() => setTick((count) => count + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [summaryRun]);
+
   const seek = useCallback((ms: number) => {
     const audio = audioRef.current;
     if (!audio) return;
     audio.currentTime = ms / 1000;
     void audio.play();
   }, []);
+
+  // A pass belongs to the recording it was started for. Left in place, switching
+  // recordings would show one recording's elapsed time against another's summary.
+  useEffect(() => {
+    startedAtRef.current = null;
+    setSummaryRun(null);
+    setSummaryError(null);
+  }, [eventId]);
 
   // Arriving from a search result: open the transcript at the moment that was matched.
   useEffect(() => {
@@ -274,13 +438,26 @@ export function Detail({ eventId, seekMs, onChanged }: Props) {
           liveCount={passRunning ? live.length : 0}
         />
 
+        {/* Above the tabs, not inside the summary one: a pass that is still running is
+            worth knowing about from the transcript or the audio too. */}
+        <SummaryProgress run={summaryRun} />
+
         {tab === "summary" ? (
           <SummaryTab
             event={event}
             segmentCount={segments.length}
-            onChanged={() => {
-              void load();
-              onChanged();
+            running={summaryRun !== null}
+            error={summaryError}
+            onError={setSummaryError}
+            // The `started` event sets this too, but the press should show immediately
+            // rather than after a round trip to the worker thread.
+            onStart={() => {
+              startedAtRef.current = Date.now();
+              setSummaryRun({ startedAt: startedAtRef.current, waiting: null });
+            }}
+            onStop={() => {
+              startedAtRef.current = null;
+              setSummaryRun(null);
             }}
           />
         ) : tab === "transcript" ? (
@@ -443,67 +620,34 @@ function TranscriptionProgress({
 function SummaryTab({
   event,
   segmentCount,
-  onChanged,
+  running,
+  error,
+  onError,
+  onStart,
+  onStop,
 }: {
   event: HearsayEvent;
   segmentCount: number;
-  onChanged: () => void;
+  /** Owned by `Detail`, which listens for the pass — a listener inside this component
+   *  would be torn down the moment another tab was selected, and the result missed. */
+  running: boolean;
+  error: string | null;
+  onError: (message: string | null) => void;
+  onStart: () => void;
+  onStop: () => void;
 }) {
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  /** Set while a busy provider is being waited out, so the delay is explained. */
-  const [waiting, setWaiting] = useState<{
-    attempt: number;
-    of: number;
-    seconds: number;
-  } | null>(null);
-
-  // The summary runs on a worker thread and reports back by event, so this listens
-  // rather than awaiting the invoke.
-  useEffect(() => {
-    const unlisten = listen<{
-      event_id: number;
-      stage: string;
-      message?: string;
-      attempt?: number;
-      of?: number;
-      seconds?: number;
-    }>("summary", (message) => {
-      if (message.payload.event_id !== event.id) return;
-      if (message.payload.stage === "done") {
-        setWaiting(null);
-        setRunning(false);
-        onChanged();
-      } else if (message.payload.stage === "waiting") {
-        // The provider is busy and the request is being sent again (§8a). Say so: the
-        // wait is as long as the provider asked for, which is long enough to be taken
-        // for a hang.
-        setWaiting({
-          attempt: message.payload.attempt ?? 1,
-          of: message.payload.of ?? 1,
-          seconds: message.payload.seconds ?? 0,
-        });
-      } else if (message.payload.stage === "failed") {
-        setWaiting(null);
-        setRunning(false);
-        setError(message.payload.message ?? "Summary failed.");
-      }
-    });
-    return () => {
-      void unlisten.then((stop) => stop());
-    };
-  }, [event.id, onChanged]);
 
   const generate = async () => {
-    setRunning(true);
-    setWaiting(null);
-    setError(null);
+    onError(null);
+    onStart();
     try {
       await invoke("generate_summary", { eventId: event.id });
     } catch (problem) {
-      setRunning(false);
-      setError(String((problem as { message?: string })?.message ?? problem));
+      // The pass never started, so nothing will arrive to end it. Clear it here or the
+      // elapsed time counts up against a request that was never sent.
+      onStop();
+      onError(String((problem as { message?: string })?.message ?? problem));
     }
   };
 
@@ -517,13 +661,6 @@ function SummaryTab({
         </div>
       ) : null}
 
-      {waiting ? (
-        <div className="banner" style={{ marginBottom: 14 }}>
-          The provider is busy. Trying again in {waiting.seconds}s — attempt{" "}
-          {waiting.attempt + 1} of {waiting.of}. Nothing has been lost.
-        </div>
-      ) : null}
-
       {event.summary_md ? (
         <>
           <div className="summary">{renderMarkdown(event.summary_md)}</div>
@@ -532,11 +669,6 @@ function SummaryTab({
               type="button"
               className="button"
               onClick={async () => {
-                // Deliberately a copy rather than a write to the calendar. A calendar
-                // description is visible to every guest on the invite, and a summary of
-                // a meeting is not always something the other attendees should read.
-                // Copying leaves that judgement with the person who was there.
-                //
                 // Two flavours go on the clipboard at once, and the destination picks.
                 // Google Docs, Word and Notion take the HTML and paste real headings and
                 // bullets; a text editor or a terminal takes the markdown. One button, no
@@ -547,7 +679,7 @@ function SummaryTab({
                   setCopied(true);
                   window.setTimeout(() => setCopied(false), 2500);
                 } catch {
-                  setError("Could not copy — select the text and copy it manually.");
+                  onError("Could not copy — select the text and copy it manually.");
                 }
               }}
             >
@@ -564,7 +696,9 @@ function SummaryTab({
         </>
       ) : (
         <div className="panel">
-          <p style={{ marginTop: 0 }}>{running ? "Writing the summary…" : "No summary yet."}</p>
+          <p style={{ marginTop: 0 }}>
+            {running ? "Writing the summary…" : "No summary yet."}
+          </p>
           <p className="small muted">
             {canGenerate
               ? "Summaries are the only feature that sends anything off this machine, and only when you ask."
