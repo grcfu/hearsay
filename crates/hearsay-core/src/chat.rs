@@ -19,7 +19,8 @@ use crate::db::Segment;
 use crate::secrets;
 use crate::summary::{
     asked_wait_body, asked_wait_header, is_transient, render_transcript, speaker_or_default,
-    across_models, Busy, Marker, ModelGone, Provider, RetryNotice,
+    across_models, rejected_the_thinking_hint, without_thinking_hint_on_refusal, Busy,
+    Marker, ModelGone, Provider, RetryNotice, ThinkingRejected,
     API_URL, API_VERSION, FALLBACK_BETA, GEMINI_URL,
 };
 
@@ -226,6 +227,19 @@ fn ask_gemini(
     model: &str,
     speaker: &str,
 ) -> Result<String> {
+    without_thinking_hint_on_refusal(|thinking| {
+        ask_gemini_once(transcript, history, question, model, speaker, thinking)
+    })
+}
+
+fn ask_gemini_once(
+    transcript: &str,
+    history: &[Turn],
+    question: &str,
+    model: &str,
+    speaker: &str,
+    thinking: Option<&str>,
+) -> Result<String> {
     let key = secrets::gemini_key()?.ok_or_else(|| {
         anyhow!(
             "no Gemini API key is set. Add one in settings — everything else in Hearsay \
@@ -247,10 +261,15 @@ fn ask_gemini(
         "parts": [{ "text": question }],
     }));
 
+    let mut generation_config = serde_json::json!({ "maxOutputTokens": MAX_TOKENS });
+    if let Some(level) = thinking {
+        generation_config["thinkingLevel"] = level.into();
+    }
+
     let request = serde_json::json!({
         "systemInstruction": { "parts": [{ "text": system_prompt(transcript, speaker) }] },
         "contents": contents,
-        "generationConfig": { "maxOutputTokens": MAX_TOKENS },
+        "generationConfig": generation_config,
     });
 
     let client = reqwest::blocking::Client::builder()
@@ -287,6 +306,12 @@ fn ask_gemini(
                 status: status.as_u16(),
                 message: message.to_string(),
                 retry_after: asked.or_else(|| asked_wait_body(&body)),
+            }
+            .into());
+        }
+        if rejected_the_thinking_hint(status.as_u16(), message) {
+            return Err(ThinkingRejected {
+                message: message.to_string(),
             }
             .into());
         }

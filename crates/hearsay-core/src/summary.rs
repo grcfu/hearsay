@@ -67,6 +67,53 @@ pub const DEFAULT_GEMINI_MODEL: &str = GEMINI_MODELS[0];
 /// is worse than a slow one.
 const MAX_TOKENS: u32 = 16_000;
 
+/// How much thinking to ask a Gemini model for.
+///
+/// Gemini 3.x Flash defaults to *medium*, and on a transcript of any length that is the
+/// difference between a summary arriving in seconds and one arriving in minutes — with
+/// the thought tokens charged to the user's key either way.
+///
+/// Low rather than medium for the reason §8a already picks Flash over Pro: this is
+/// summarising, not reasoning. The model is being asked to reorganise text it has been
+/// handed, under a schema that already fixes the shape of the answer, and told explicitly
+/// not to infer anything the transcript does not say. Not `minimal`, because the action
+/// items do need the model to work out who committed to what.
+pub(crate) const THINKING_LEVEL: &str = "low";
+
+/// A model that would not accept the thinking hint.
+///
+/// `thinkingLevel` arrived with Gemini 3.x, and an older candidate in [`GEMINI_MODELS`]
+/// answers a request carrying it with a 400. That is a rejection of the hint and not of
+/// the transcript, so it is worth exactly one more send without it — where a genuine
+/// `INVALID_ARGUMENT` is still reported, because the match is on the field name.
+#[derive(Debug, thiserror::Error)]
+#[error("the model would not take the thinking hint: {message}")]
+pub(crate) struct ThinkingRejected {
+    pub message: String,
+}
+
+/// Whether a rejection is the model refusing the thinking hint rather than the request.
+pub(crate) fn rejected_the_thinking_hint(status: u16, message: &str) -> bool {
+    status == 400 && message.to_ascii_lowercase().contains("thinking")
+}
+
+/// One retry without the hint, for a model that does not know the field.
+///
+/// Not folded into `with_retry`: that exists for a provider which never looked at the
+/// request, and this is a provider that looked and objected to one field. Sending the
+/// same request again would collect the same objection.
+pub(crate) fn without_thinking_hint_on_refusal<T>(
+    mut attempt: impl FnMut(Option<&str>) -> Result<T>,
+) -> Result<T> {
+    match attempt(Some(THINKING_LEVEL)) {
+        Err(error) if error.downcast_ref::<ThinkingRejected>().is_some() => {
+            tracing::warn!("the model does not take a thinking level, sending without it");
+            attempt(None)
+        }
+        outcome => outcome,
+    }
+}
+
 /// Summaries of an hour-long meeting take a while. Well above the default so a long
 /// transcript does not fail on a client-side timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -594,6 +641,17 @@ fn summarize_anthropic(transcript: &str, model: &str, speaker: &str) -> Result<S
 /// the system prompt in `systemInstruction`, and the answer comes back nested under
 /// `candidates`. Only this function knows any of that.
 fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summary> {
+    without_thinking_hint_on_refusal(|thinking| {
+        summarize_gemini_once(transcript, model, speaker, thinking)
+    })
+}
+
+fn summarize_gemini_once(
+    transcript: &str,
+    model: &str,
+    speaker: &str,
+    thinking: Option<&str>,
+) -> Result<Summary> {
     let key = secrets::gemini_key()?.ok_or_else(|| {
         anyhow!(
             "no Gemini API key is set. Add one in settings — everything else in Hearsay \
@@ -601,20 +659,25 @@ fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summ
         )
     })?;
 
+    let mut generation_config = serde_json::json!({
+        // Set here as it is on the chat path: without it the model's own default ceiling
+        // applies, which is lower than MAX_TOKENS, and a long summary comes back
+        // truncated as a MAX_TOKENS finish with the work already paid for.
+        "maxOutputTokens": MAX_TOKENS,
+        "responseMimeType": "application/json",
+        "responseSchema": gemini_schema(),
+    });
+    if let Some(level) = thinking {
+        generation_config["thinkingLevel"] = level.into();
+    }
+
     let request = serde_json::json!({
         "systemInstruction": { "parts": [{ "text": system_prompt(speaker) }] },
         "contents": [{
             "role": "user",
             "parts": [{ "text": user_prompt(transcript, speaker) }],
         }],
-        "generationConfig": {
-            // Set here as it is on the chat path: without it the model's own default
-            // ceiling applies, which is lower than MAX_TOKENS, and a long summary comes
-            // back truncated as a MAX_TOKENS finish with the work already paid for.
-            "maxOutputTokens": MAX_TOKENS,
-            "responseMimeType": "application/json",
-            "responseSchema": gemini_schema(),
-        },
+        "generationConfig": generation_config,
     });
 
     let client = reqwest::blocking::Client::builder()
@@ -651,6 +714,12 @@ fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summ
                 status: status.as_u16(),
                 message: message.to_string(),
                 retry_after: asked.or_else(|| asked_wait_body(&body)),
+            }
+            .into());
+        }
+        if rejected_the_thinking_hint(status.as_u16(), message) {
+            return Err(ThinkingRejected {
+                message: message.to_string(),
             }
             .into());
         }
@@ -1106,6 +1175,60 @@ mod tests {
         assert_eq!(asked_wait_header(&headers), None, "and neither does a negative");
 
         assert_eq!(asked_wait_body(&serde_json::json!({ "error": {} })), None);
+    }
+
+    /// A model that does not know `thinkingLevel` rejects the request with a 400 naming
+    /// the field. That is a rejection of the hint, not of the transcript — and the older
+    /// candidates in the model list are exactly the ones that will do it.
+    #[test]
+    fn a_model_that_will_not_take_the_thinking_hint_is_sent_the_request_without_it() {
+        let sent = std::cell::RefCell::new(Vec::new());
+        let outcome = without_thinking_hint_on_refusal(|thinking| {
+            sent.borrow_mut().push(thinking.map(str::to_string));
+            if thinking.is_some() {
+                return Err(ThinkingRejected {
+                    message: "Unknown name \"thinkingLevel\"".to_string(),
+                }
+                .into());
+            }
+            Ok("summary")
+        });
+
+        assert_eq!(outcome.expect("the second send should have landed"), "summary");
+        assert_eq!(
+            *sent.borrow(),
+            vec![Some(THINKING_LEVEL.to_string()), None],
+            "the hint should be tried once, then dropped"
+        );
+    }
+
+    /// One retry, not a loop, and only for that one field. Everything else the provider
+    /// objects to is its verdict on the request.
+    #[test]
+    fn any_other_rejection_is_not_sent_again() {
+        let sent = Cell::new(0u32);
+        let outcome: Result<()> = without_thinking_hint_on_refusal(|_| {
+            sent.set(sent.get() + 1);
+            Err(anyhow!("the Gemini API rejected the request (400): transcript too long"))
+        });
+
+        assert!(outcome.is_err());
+        assert_eq!(sent.get(), 1, "a real rejection must not be resent");
+    }
+
+    /// Matched on the field name, so an unrelated 400 is still reported as one.
+    #[test]
+    fn only_a_400_naming_the_field_counts_as_the_hint_being_refused() {
+        assert!(rejected_the_thinking_hint(400, "Unknown name \"thinkingLevel\""));
+        assert!(rejected_the_thinking_hint(400, "Invalid thinking_level value"));
+        assert!(
+            !rejected_the_thinking_hint(400, "The input token count exceeds the maximum"),
+            "an over-long transcript is not the hint being refused"
+        );
+        assert!(
+            !rejected_the_thinking_hint(503, "thinking is busy"),
+            "a busy provider is a wait, and must stay one"
+        );
     }
 
     /// A model that escapes its own newlines inside the JSON leaves a summary with every

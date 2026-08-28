@@ -419,6 +419,23 @@ When nothing answers, **the failure names every model tried.** Told only about t
 an out-of-capacity provider reads as one broken model, and the user goes looking for a
 setting to change instead of waiting.
 
+### Thinking is asked to stay low
+
+Gemini 3.x Flash defaults to *medium* thinking, and on a transcript of any length that is
+the difference between a summary arriving in seconds and one arriving in minutes — with
+the thought tokens charged to the user's key either way. So `thinkingLevel` is set to
+**low**, for the reason §8a already picks Flash over Pro: this is summarising, not
+reasoning. The model reorganises text it has been handed, under a schema that already
+fixes the shape of the answer, and is told not to infer anything the transcript does not
+say. Not `minimal`, because the action items do need it to work out who committed to what.
+
+`thinkingLevel` arrived with Gemini 3.x, so an older candidate in the model list answers a
+request carrying it with a 400 naming the field. **That is a rejection of the hint, not of
+the transcript, and earns exactly one more send without it** — matched on the field name,
+so a genuine `INVALID_ARGUMENT` is still reported. It is deliberately not folded into the
+busy-provider retry: that exists for a provider which never looked at the request, and
+this is one that looked and objected to a single field.
+
 ### What a summary pass can honestly report
 
 **Elapsed time, not a percentage.** Transcription has a real progress bar because it
