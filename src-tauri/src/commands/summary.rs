@@ -67,8 +67,22 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64) {
         let model = Provider::current().default_model();
         // The name the summary should call the recorder by. Unset simply means "You".
         let speaker = db.preference(SPEAKER_NAME_KEY)?;
-        let summary =
-            summary::summarize(&segments, &markers, model, speaker.as_deref())?;
+        // A busy provider is waited out rather than reported (§8a), and that wait is
+        // now as long as the provider asks for — long enough that a spinner with
+        // nothing behind it reads as a hang. Say what is happening instead.
+        let summary = summary::summarize(&segments, &markers, model, speaker.as_deref(), |notice| {
+            let _ = app.emit(
+                "summary",
+                serde_json::json!({
+                    "event_id": event_id,
+                    "stage": "waiting",
+                    "attempt": notice.attempt,
+                    "of": notice.of,
+                    "seconds": notice.waiting.as_secs(),
+                    "message": notice.busy.to_string(),
+                }),
+            );
+        })?;
         db.set_summary(
             event_id,
             &summary.to_markdown(speaker.as_deref()),

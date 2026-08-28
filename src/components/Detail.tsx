@@ -452,23 +452,44 @@ function SummaryTab({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  /** Set while a busy provider is being waited out, so the delay is explained. */
+  const [waiting, setWaiting] = useState<{
+    attempt: number;
+    of: number;
+    seconds: number;
+  } | null>(null);
 
   // The summary runs on a worker thread and reports back by event, so this listens
   // rather than awaiting the invoke.
   useEffect(() => {
-    const unlisten = listen<{ event_id: number; stage: string; message?: string }>(
-      "summary",
-      (message) => {
-        if (message.payload.event_id !== event.id) return;
-        if (message.payload.stage === "done") {
-          setRunning(false);
-          onChanged();
-        } else if (message.payload.stage === "failed") {
-          setRunning(false);
-          setError(message.payload.message ?? "Summary failed.");
-        }
-      },
-    );
+    const unlisten = listen<{
+      event_id: number;
+      stage: string;
+      message?: string;
+      attempt?: number;
+      of?: number;
+      seconds?: number;
+    }>("summary", (message) => {
+      if (message.payload.event_id !== event.id) return;
+      if (message.payload.stage === "done") {
+        setWaiting(null);
+        setRunning(false);
+        onChanged();
+      } else if (message.payload.stage === "waiting") {
+        // The provider is busy and the request is being sent again (§8a). Say so: the
+        // wait is as long as the provider asked for, which is long enough to be taken
+        // for a hang.
+        setWaiting({
+          attempt: message.payload.attempt ?? 1,
+          of: message.payload.of ?? 1,
+          seconds: message.payload.seconds ?? 0,
+        });
+      } else if (message.payload.stage === "failed") {
+        setWaiting(null);
+        setRunning(false);
+        setError(message.payload.message ?? "Summary failed.");
+      }
+    });
     return () => {
       void unlisten.then((stop) => stop());
     };
@@ -476,6 +497,7 @@ function SummaryTab({
 
   const generate = async () => {
     setRunning(true);
+    setWaiting(null);
     setError(null);
     try {
       await invoke("generate_summary", { eventId: event.id });
@@ -492,6 +514,13 @@ function SummaryTab({
       {error ? (
         <div className="banner problem" style={{ marginBottom: 14 }}>
           {error}
+        </div>
+      ) : null}
+
+      {waiting ? (
+        <div className="banner" style={{ marginBottom: 14 }}>
+          The provider is busy. Trying again in {waiting.seconds}s — attempt{" "}
+          {waiting.attempt + 1} of {waiting.of}. Nothing has been lost.
         </div>
       ) : null}
 

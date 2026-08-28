@@ -397,6 +397,13 @@ blip reads as a bad key, a retired model, or something wrong with the recording.
   than being told to try again; the doubling wait, starting at five seconds, applies when
   the provider says nothing. A `retry-after` given as an HTTP date is not read: it is on
   the provider's clock, and a skewed one would turn a short wait into a long one.
+- **The wait is shown, not just logged.** A retry is invisible from the outside — the
+  button spins and nothing says why — and waiting out the provider's own delay makes that
+  silence long enough to read as a hang, which is the same class of failure as a control
+  that looks live and does nothing. So each wait emits a `waiting` stage carrying the
+  attempt, the total, and the seconds, and both panes say the provider is busy and when
+  the next attempt goes out. The summary pane adds that nothing has been lost; the Ask
+  pane does not need to, because the question is still in front of the person.
 - **A timeout or a failed connection is deliberately not retried**, even though it might
   well succeed. The provider may have received and processed that request, so sending it
   again is a second upload of the transcript and a second charge on the user's key for an

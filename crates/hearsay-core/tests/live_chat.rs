@@ -14,7 +14,7 @@
 
 use hearsay_core::chat;
 use hearsay_core::db::Segment;
-use hearsay_core::summary::Provider;
+use hearsay_core::summary::{self, Provider};
 
 fn segment(id: i64, channel: &str, start_ms: i64, text: &str) -> Segment {
     Segment {
@@ -62,6 +62,7 @@ fn a_question_is_answered_from_the_transcript() {
         "How many engineers are on the team, and when do applications close?",
         model,
         Some("Anikait"),
+        summary::ignore_retries,
     )
     .expect("the question should be answered");
 
@@ -92,6 +93,7 @@ fn a_question_the_transcript_does_not_answer_is_declined() {
         "What is Dana's salary, and what city does she live in?",
         model,
         Some("Anikait"),
+        summary::ignore_retries,
     )
     .expect("the question should get a response");
 
@@ -125,6 +127,7 @@ fn earlier_turns_are_carried_into_later_questions() {
         "What team did she say she leads?",
         model,
         Some("Anikait"),
+        summary::ignore_retries,
     )
     .expect("the follow-up should be answered");
 

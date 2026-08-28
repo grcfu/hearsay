@@ -139,6 +139,28 @@ pub fn is_transient(status: u16) -> bool {
     matches!(status, 429 | 500 | 502 | 503 | 504 | 529)
 }
 
+/// What the caller is told while a busy provider is being waited out.
+///
+/// A retry is silent from the outside: the button stays spinning and nothing says why.
+/// Waiting out the provider's own delay made that silence long enough to look like a
+/// hang, so the wait is reported rather than merely logged — the pane can say the
+/// provider is busy and when the next attempt goes out.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryNotice<'a> {
+    /// The attempt that just came back busy, counting from one.
+    pub attempt: u32,
+    /// How many will be made in total.
+    pub of: u32,
+    /// How long the next one is being held back.
+    pub waiting: Duration,
+    /// What the provider said.
+    pub busy: &'a Busy,
+}
+
+/// A reporter for callers with nowhere to put the notice — tests, and anything not
+/// driving a user interface.
+pub fn ignore_retries(_: RetryNotice) {}
+
 /// Sends a request, trying again while the provider says it is too busy.
 ///
 /// **Only a `Busy` is retried.** A request that timed out or could not connect is not,
@@ -149,8 +171,11 @@ pub fn is_transient(status: u16) -> bool {
 ///
 /// This adds no outbound trigger. It is the same explicit press, sent again after the
 /// provider declined to handle it.
-pub fn with_retry<T>(attempt: impl FnMut() -> Result<T>) -> Result<T> {
-    retrying(RETRY_BACKOFF, attempt)
+pub fn with_retry<T>(
+    report: impl FnMut(RetryNotice),
+    attempt: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    retrying(RETRY_BACKOFF, report, attempt)
 }
 
 /// How long to wait before sending again: the provider's own figure where it gave one,
@@ -166,7 +191,11 @@ fn next_wait(busy: &Busy, fallback: Duration) -> Duration {
 }
 
 /// The retry loop, with the first wait passed in so tests need not sit through it.
-fn retrying<T>(first_wait: Duration, mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
+fn retrying<T>(
+    first_wait: Duration,
+    mut report: impl FnMut(RetryNotice),
+    mut attempt: impl FnMut() -> Result<T>,
+) -> Result<T> {
     let mut wait = first_wait;
     let mut sent = 0u32;
 
@@ -196,6 +225,12 @@ fn retrying<T>(first_wait: Duration, mut attempt: impl FnMut() -> Result<T>) -> 
             "provider busy on attempt {sent} of {SEND_ATTEMPTS}, waiting {:?}: {error:#}",
             this_wait
         );
+        report(RetryNotice {
+            attempt: sent,
+            of: SEND_ATTEMPTS,
+            waiting: this_wait,
+            busy,
+        });
         std::thread::sleep(this_wait);
         wait *= 2;
     }
@@ -293,6 +328,7 @@ pub fn summarize(
     markers: &[(Marker, i64, i64)],
     model: &str,
     speaker: Option<&str>,
+    report: impl FnMut(RetryNotice),
 ) -> Result<Summary> {
     let speaker = speaker_or_default(speaker);
     let transcript = render_transcript(segments, markers, Some(speaker));
@@ -304,8 +340,10 @@ pub fn summarize(
     }
 
     match Provider::current() {
-        Provider::Anthropic => with_retry(|| summarize_anthropic(&transcript, model, speaker)),
-        Provider::Gemini => with_retry(|| summarize_gemini(&transcript, model, speaker)),
+        Provider::Anthropic => {
+            with_retry(report, || summarize_anthropic(&transcript, model, speaker))
+        }
+        Provider::Gemini => with_retry(report, || summarize_gemini(&transcript, model, speaker)),
     }
 }
 
@@ -812,7 +850,7 @@ mod tests {
     #[test]
     fn a_provider_that_is_busy_once_is_tried_again() {
         let sent = Cell::new(0u32);
-        let outcome = retrying(Duration::ZERO, || {
+        let outcome = retrying(Duration::ZERO, ignore_retries, || {
             sent.set(sent.get() + 1);
             if sent.get() == 1 {
                 return Err(Busy {
@@ -835,7 +873,7 @@ mod tests {
     #[test]
     fn a_rejected_request_is_not_sent_again() {
         let sent = Cell::new(0u32);
-        let outcome: Result<()> = retrying(Duration::ZERO, || {
+        let outcome: Result<()> = retrying(Duration::ZERO, ignore_retries, || {
             sent.set(sent.get() + 1);
             Err(anyhow!("the Gemini API rejected the request (401): bad key"))
         });
@@ -847,7 +885,7 @@ mod tests {
     #[test]
     fn a_provider_that_stays_busy_is_reported_with_what_it_said() {
         let sent = Cell::new(0u32);
-        let outcome: Result<()> = retrying(Duration::ZERO, || {
+        let outcome: Result<()> = retrying(Duration::ZERO, ignore_retries, || {
             sent.set(sent.get() + 1);
             Err(Busy {
                 provider: "the Gemini API",

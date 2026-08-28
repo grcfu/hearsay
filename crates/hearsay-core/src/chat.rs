@@ -19,7 +19,7 @@ use crate::db::Segment;
 use crate::secrets;
 use crate::summary::{
     asked_wait_body, asked_wait_header, is_transient, render_transcript, speaker_or_default,
-    with_retry, Busy, Marker, Provider,
+    with_retry, Busy, Marker, Provider, RetryNotice,
     API_URL, API_VERSION, FALLBACK_BETA, GEMINI_URL,
 };
 
@@ -77,6 +77,7 @@ pub fn ask(
     question: &str,
     model: &str,
     speaker: Option<&str>,
+    report: impl FnMut(RetryNotice),
 ) -> Result<String> {
     let question = question.trim();
     if question.is_empty() {
@@ -97,10 +98,12 @@ pub fn ask(
     // the person is sitting in front of the box waiting for an answer.
     match Provider::current() {
         Provider::Anthropic => {
-            with_retry(|| ask_anthropic(&transcript, history, question, model, speaker))
+            with_retry(report, || {
+                ask_anthropic(&transcript, history, question, model, speaker)
+            })
         }
         Provider::Gemini => {
-            with_retry(|| ask_gemini(&transcript, history, question, model, speaker))
+            with_retry(report, || ask_gemini(&transcript, history, question, model, speaker))
         }
     }
 }
@@ -410,14 +413,15 @@ mod tests {
     #[test]
     fn a_blank_question_is_refused_before_anything_is_sent() {
         let segments = [segment(1, "system", 0, "something was said")];
-        let error = ask(&segments, &[], &[], "   ", "model", None)
+        let error = ask(&segments, &[], &[], "   ", "model", None, crate::summary::ignore_retries)
             .expect_err("a blank question should not reach the network");
         assert!(error.to_string().contains("no question"));
     }
 
     #[test]
     fn a_recording_with_no_transcript_cannot_be_asked_about() {
-        let error = ask(&[], &[], &[], "what did they say?", "model", None)
+        let error =
+            ask(&[], &[], &[], "what did they say?", "model", None, crate::summary::ignore_retries)
             .expect_err("there is nothing to answer from");
         assert!(error.to_string().contains("no transcript"));
     }

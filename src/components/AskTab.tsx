@@ -39,6 +39,12 @@ export function AskTab({ eventId, segmentCount, settings, onSeek, canSeek }: Pro
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
+  /** Set while a busy provider is being waited out, so the delay is explained. */
+  const [waiting, setWaiting] = useState<{
+    attempt: number;
+    of: number;
+    seconds: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
@@ -55,6 +61,7 @@ export function AskTab({ eventId, segmentCount, settings, onSeek, canSeek }: Pro
     setQuestion("");
     setError(null);
     setAsking(false);
+    setWaiting(null);
   }, [load]);
 
   // The answer arrives on a worker thread, so this listens rather than awaiting.
@@ -64,12 +71,26 @@ export function AskTab({ eventId, segmentCount, settings, onSeek, canSeek }: Pro
       stage: string;
       message?: string;
       question?: string;
+      attempt?: number;
+      of?: number;
+      seconds?: number;
     }>("chat", (message) => {
       if (message.payload.event_id !== eventId) return;
       if (message.payload.stage === "answered") {
+        setWaiting(null);
         setAsking(false);
         void load();
+      } else if (message.payload.stage === "waiting") {
+        // The provider is busy and the request is being sent again (§8a). Say so: the
+        // wait is as long as the provider asked for, which is long enough to be taken
+        // for a hang.
+        setWaiting({
+          attempt: message.payload.attempt ?? 1,
+          of: message.payload.of ?? 1,
+          seconds: message.payload.seconds ?? 0,
+        });
       } else if (message.payload.stage === "failed") {
+        setWaiting(null);
         setAsking(false);
         setError(message.payload.message ?? "That question could not be answered.");
         // The question was withdrawn so it is not replayed as history. Put it back in the
@@ -92,6 +113,7 @@ export function AskTab({ eventId, segmentCount, settings, onSeek, canSeek }: Pro
     const trimmed = question.trim();
     if (!trimmed || asking) return;
     setAsking(true);
+    setWaiting(null);
     setError(null);
     // Cleared optimistically so the box is ready for the next question; restored from the
     // failure event if the answer never comes.
@@ -194,7 +216,13 @@ export function AskTab({ eventId, segmentCount, settings, onSeek, canSeek }: Pro
         {asking ? (
           <div className="ask-turn ask-assistant">
             <div className="ask-role">Answer</div>
-            <div className="ask-content muted">Reading the transcript…</div>
+            <div className="ask-content muted">
+              {waiting
+                ? `The provider is busy. Trying again in ${waiting.seconds}s — attempt ${
+                    waiting.attempt + 1
+                  } of ${waiting.of}.`
+                : "Reading the transcript…"}
+            </div>
           </div>
         ) : null}
         <div ref={endRef} />
