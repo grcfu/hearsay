@@ -52,15 +52,15 @@ fn transcript() -> Vec<Segment> {
 #[ignore = "needs an API key in the Keychain and spends a real request"]
 fn a_question_is_answered_from_the_transcript() {
     let provider = Provider::current();
-    let model = provider.default_model();
-    println!("asking {} ({model})", provider.as_str());
+    let models = provider.models();
+    println!("asking {} ({})", provider.as_str(), models.join(", "));
 
     let answer = chat::ask(
         &transcript(),
         &[],
         &[],
         "How many engineers are on the team, and when do applications close?",
-        model,
+        models,
         Some("Anikait"),
         summary::ignore_retries,
     )
@@ -84,14 +84,14 @@ fn a_question_is_answered_from_the_transcript() {
 #[test]
 #[ignore = "needs an API key in the Keychain and spends a real request"]
 fn a_question_the_transcript_does_not_answer_is_declined() {
-    let model = Provider::current().default_model();
+    let models = Provider::current().models();
 
     let answer = chat::ask(
         &transcript(),
         &[],
         &[],
         "What is Dana's salary, and what city does she live in?",
-        model,
+        models,
         Some("Anikait"),
         summary::ignore_retries,
     )
@@ -113,7 +113,7 @@ fn a_question_the_transcript_does_not_answer_is_declined() {
 #[test]
 #[ignore = "needs an API key in the Keychain and spends a real request"]
 fn earlier_turns_are_carried_into_later_questions() {
-    let model = Provider::current().default_model();
+    let models = Provider::current().models();
 
     let history = vec![
         chat::Turn::user("Who was I speaking to?"),
@@ -125,7 +125,7 @@ fn earlier_turns_are_carried_into_later_questions() {
         &[],
         &history,
         "What team did she say she leads?",
-        model,
+        models,
         Some("Anikait"),
         summary::ignore_retries,
     )

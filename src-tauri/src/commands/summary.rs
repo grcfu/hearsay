@@ -63,14 +63,16 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64) {
         // the user choosing to go quiet.
         let markers = summary::markers(&db.mute_spans(event_id)?, &db.capture_spans(event_id)?);
 
-        // Each provider names its own model; the caller does not choose one.
-        let model = Provider::current().default_model();
+        // Each provider names its own models; the caller does not choose one. A list,
+        // not a name: Gemini sheds load on a newly released model for weeks, so the
+        // first that answers is used and recorded.
+        let models = Provider::current().models();
         // The name the summary should call the recorder by. Unset simply means "You".
         let speaker = db.preference(SPEAKER_NAME_KEY)?;
         // A busy provider is waited out rather than reported (§8a), and that wait is
         // now as long as the provider asks for — long enough that a spinner with
         // nothing behind it reads as a hang. Say what is happening instead.
-        let summary = summary::summarize(&segments, &markers, model, speaker.as_deref(), |notice| {
+        let done = summary::summarize(&segments, &markers, models, speaker.as_deref(), |notice| {
             let _ = app.emit(
                 "summary",
                 serde_json::json!({
@@ -83,11 +85,13 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64) {
                 }),
             );
         })?;
+        // The model that answered, not the one asked first — they differ whenever the
+        // first choice was out of capacity.
         db.set_summary(
             event_id,
-            &summary.to_markdown(speaker.as_deref()),
-            Some(summary.title.as_str()),
-            model,
+            &done.summary.to_markdown(speaker.as_deref()),
+            Some(done.summary.title.as_str()),
+            done.model,
         )?;
         Ok(())
     })();

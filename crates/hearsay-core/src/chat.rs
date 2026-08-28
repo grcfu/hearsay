@@ -19,7 +19,7 @@ use crate::db::Segment;
 use crate::secrets;
 use crate::summary::{
     asked_wait_body, asked_wait_header, is_transient, render_transcript, speaker_or_default,
-    with_retry, Busy, Marker, Provider, RetryNotice,
+    across_models, Busy, Marker, ModelGone, Provider, RetryNotice,
     API_URL, API_VERSION, FALLBACK_BETA, GEMINI_URL,
 };
 
@@ -75,7 +75,7 @@ pub fn ask(
     markers: &[(Marker, i64, i64)],
     history: &[Turn],
     question: &str,
-    model: &str,
+    models: &[&'static str],
     speaker: Option<&str>,
     report: impl FnMut(RetryNotice),
 ) -> Result<String> {
@@ -96,16 +96,19 @@ pub fn ask(
     // Retried while the provider says it is too busy, for the reason it is on the summary
     // path — and more sharply here, because a question that fails is withdrawn (§8b) and
     // the person is sitting in front of the box waiting for an answer.
+    // The same walk down the candidate list the summary path makes, and for the same
+    // reason: a model Google has just shipped sheds load for weeks, and a question that
+    // fails is withdrawn (§8b). Which model answered is not recorded for a question —
+    // the answer is prose, not a stored artefact with provenance.
     match Provider::current() {
-        Provider::Anthropic => {
-            with_retry(report, || {
-                ask_anthropic(&transcript, history, question, model, speaker)
-            })
-        }
-        Provider::Gemini => {
-            with_retry(report, || ask_gemini(&transcript, history, question, model, speaker))
-        }
+        Provider::Anthropic => across_models(models, report, |model| {
+            ask_anthropic(&transcript, history, question, model, speaker)
+        }),
+        Provider::Gemini => across_models(models, report, |model| {
+            ask_gemini(&transcript, history, question, model, speaker)
+        }),
     }
+    .map(|(answer, _)| answer)
 }
 
 fn ask_anthropic(
@@ -288,11 +291,12 @@ fn ask_gemini(
             .into());
         }
         if status.as_u16() == 404 {
-            return Err(anyhow!(
-                "Gemini does not offer the model {model} to this key ({message}). \
-                 Google retires models periodically; Hearsay defaults to \
-                 `gemini-flash-latest`, which tracks the current one."
-            ));
+            return Err(ModelGone {
+                provider: "the Gemini API",
+                model: model.to_string(),
+                message: message.to_string(),
+            }
+            .into());
         }
         return Err(anyhow!("the Gemini API rejected the question ({status}): {message}"));
     }
@@ -413,7 +417,7 @@ mod tests {
     #[test]
     fn a_blank_question_is_refused_before_anything_is_sent() {
         let segments = [segment(1, "system", 0, "something was said")];
-        let error = ask(&segments, &[], &[], "   ", "model", None, crate::summary::ignore_retries)
+        let error = ask(&segments, &[], &[], "   ", &["model"], None, crate::summary::ignore_retries)
             .expect_err("a blank question should not reach the network");
         assert!(error.to_string().contains("no question"));
     }
@@ -421,7 +425,7 @@ mod tests {
     #[test]
     fn a_recording_with_no_transcript_cannot_be_asked_about() {
         let error =
-            ask(&[], &[], &[], "what did they say?", "model", None, crate::summary::ignore_retries)
+            ask(&[], &[], &[], "what did they say?", &["model"], None, crate::summary::ignore_retries)
             .expect_err("there is nothing to answer from");
         assert!(error.to_string().contains("no transcript"));
     }

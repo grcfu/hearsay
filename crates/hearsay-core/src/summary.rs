@@ -32,14 +32,36 @@ pub(crate) const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 
 pub(crate) const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-/// Gemini model used for summaries.
+
+/// Gemini models to try for a summary, in order, stopping at the first that answers.
 ///
-/// An alias rather than a version number, deliberately. `gemini-2.5-flash` was pinned
-/// here and stopped being available to new keys within weeks — Google retires numbered
-/// models faster than a local-first app gets rebuilt. `gemini-flash-latest` is
-/// maintained by Google to point at the current Flash model, so it cannot rot the same
-/// way. Flash rather than Pro because this is summarising, not reasoning.
-pub const DEFAULT_GEMINI_MODEL: &str = "gemini-flash-latest";
+/// A list rather than one name, because the two ways of naming a single model both fail
+/// and they fail in opposite directions:
+///
+/// - **A pinned version rots.** `gemini-2.5-flash` was pinned here and stopped being
+///   available to new keys within weeks. Google retires numbered models faster than a
+///   local-first app gets rebuilt.
+/// - **An alias rides whatever Google shipped last week.** `gemini-flash-latest` was the
+///   fix for the above, and it is hot-swapped to the newest Flash release — *including a
+///   preview or experimental one*. A newly released model is capacity-starved for its
+///   first weeks, and the API sheds that load as 503 "this model is currently
+///   experiencing high demand". That is server-side and Google-wide: it is not the key,
+///   not the request, and not something a paid tier or a longer backoff fixes.
+///
+/// So neither is trusted alone. A mature stable release is tried first — summarising is
+/// not a frontier task, and §8a already picks Flash over Pro for the same reason — and
+/// the alias sits at the end as the backstop that cannot rot. Whichever answers is
+/// recorded in `events.model_used`, so what produced a summary is never a guess.
+pub const GEMINI_MODELS: &[&'static str] = &[
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    // Last, deliberately: if every name above has been retired, this is still something.
+    "gemini-flash-latest",
+];
+
+/// The first candidate, for anything that needs a single name to show.
+pub const DEFAULT_GEMINI_MODEL: &str = GEMINI_MODELS[0];
 
 /// Generous, because thinking tokens count against this ceiling and a truncated summary
 /// is worse than a slow one.
@@ -129,6 +151,70 @@ fn duration_from_seconds(seconds: f64) -> Option<Duration> {
         return None;
     }
     Some(Duration::from_secs_f64(seconds))
+}
+
+/// A model this key cannot reach: retired, renamed, or never offered to it.
+///
+/// Its own kind of error for the same reason `Busy` is: it says nothing about the
+/// request, only about the name it was addressed to, so the next candidate is worth
+/// trying. Every other rejection is a verdict on what was sent and stops the attempt.
+#[derive(Debug, thiserror::Error)]
+#[error("{provider} does not offer the model {model} to this key: {message}")]
+pub struct ModelGone {
+    pub provider: &'static str,
+    pub model: String,
+    pub message: String,
+}
+
+/// Whether an error means another model is worth trying: the provider ran out of
+/// capacity for this one, or does not have it at all.
+fn worth_another_model(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Busy>().is_some() || error.downcast_ref::<ModelGone>().is_some()
+}
+
+/// Tries each model in turn, moving on when one is out of capacity or gone, and returns
+/// the answer along with the name that produced it.
+///
+/// The retry in `with_retry` is the inner loop — a blip on one model is waited out before
+/// the next is considered — because switching model on a one-second wobble would change
+/// which model wrote a summary for no reason. Only a model that stays unavailable for all
+/// three attempts is given up on.
+pub fn across_models<T>(
+    models: &[&'static str],
+    report: impl FnMut(RetryNotice),
+    attempt: impl FnMut(&str) -> Result<T>,
+) -> Result<(T, &'static str)> {
+    walking(models, RETRY_BACKOFF, report, attempt)
+}
+
+/// The walk, with the first wait passed in so tests need not sit through three backoffs
+/// per candidate.
+fn walking<T>(
+    models: &[&'static str],
+    first_wait: Duration,
+    mut report: impl FnMut(RetryNotice),
+    mut attempt: impl FnMut(&str) -> Result<T>,
+) -> Result<(T, &'static str)> {
+    let mut tried: Vec<&str> = Vec::new();
+    let mut last: Option<anyhow::Error> = None;
+
+    for model in models {
+        match retrying(first_wait, &mut report, || attempt(model)) {
+            Ok(value) => return Ok((value, model)),
+            Err(error) if worth_another_model(&error) => {
+                tracing::warn!("{model} is unavailable, trying the next: {error:#}");
+                tried.push(model);
+                last = Some(error);
+            }
+            // A verdict on the request. Every other model would return it too.
+            Err(error) => return Err(error),
+        }
+    }
+
+    let error = last.unwrap_or_else(|| anyhow!("no model was configured to try"));
+    // Name them all: told only about the last, this reads as one model being broken
+    // rather than as the provider being out of capacity across the board.
+    Err(error.context(format!("tried {}", tried.join(", "))))
 }
 
 /// Whether a status means "come back later" rather than "your request was wrong".
@@ -311,6 +397,16 @@ impl Provider {
         }
     }
 
+    /// The models to try, in order. One for Anthropic: it does not shed load onto a
+    /// preview model the way an alias hot-swapped to the newest Flash does, and 529 is
+    /// already handled by the retry.
+    pub fn models(self) -> &'static [&'static str] {
+        match self {
+            Provider::Anthropic => &[DEFAULT_MODEL],
+            Provider::Gemini => GEMINI_MODELS,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::Anthropic => "anthropic",
@@ -323,13 +419,23 @@ impl Provider {
 ///
 /// Blocking; call it from a worker thread. Returns a clear error when there is no key,
 /// no transcript, or the API declines — the caller shows these to the user verbatim.
+/// A summary, and the model that actually produced it.
+///
+/// The name is returned rather than assumed because the caller's first choice may have
+/// been out of capacity — `events.model_used` must record what answered, not what was
+/// asked first.
+pub struct Summarized {
+    pub summary: Summary,
+    pub model: &'static str,
+}
+
 pub fn summarize(
     segments: &[Segment],
     markers: &[(Marker, i64, i64)],
-    model: &str,
+    models: &[&'static str],
     speaker: Option<&str>,
     report: impl FnMut(RetryNotice),
-) -> Result<Summary> {
+) -> Result<Summarized> {
     let speaker = speaker_or_default(speaker);
     let transcript = render_transcript(segments, markers, Some(speaker));
     if transcript.trim().is_empty() {
@@ -341,10 +447,17 @@ pub fn summarize(
 
     match Provider::current() {
         Provider::Anthropic => {
-            with_retry(report, || summarize_anthropic(&transcript, model, speaker))
+            across_models(models, report, |model| {
+                summarize_anthropic(&transcript, model, speaker)
+            })
         }
-        Provider::Gemini => with_retry(report, || summarize_gemini(&transcript, model, speaker)),
+        Provider::Gemini => {
+            across_models(models, report, |model| {
+                summarize_gemini(&transcript, model, speaker)
+            })
+        }
     }
+    .map(|(summary, model)| Summarized { summary, model })
 }
 
 fn summarize_anthropic(transcript: &str, model: &str, speaker: &str) -> Result<Summary> {
@@ -473,6 +586,10 @@ fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summ
             "parts": [{ "text": user_prompt(transcript, speaker) }],
         }],
         "generationConfig": {
+            // Set here as it is on the chat path: without it the model's own default
+            // ceiling applies, which is lower than MAX_TOKENS, and a long summary comes
+            // back truncated as a MAX_TOKENS finish with the work already paid for.
+            "maxOutputTokens": MAX_TOKENS,
             "responseMimeType": "application/json",
             "responseSchema": gemini_schema(),
         },
@@ -516,11 +633,14 @@ fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summ
             .into());
         }
         if status.as_u16() == 404 {
-            return Err(anyhow!(
-                "Gemini does not offer the model {model} to this key ({message}). \
-                 Google retires models periodically; Hearsay defaults to \
-                 `gemini-flash-latest`, which tracks the current one."
-            ));
+            // Typed, so the caller moves to the next candidate rather than reporting a
+            // retired model as a failure.
+            return Err(ModelGone {
+                provider: "the Gemini API",
+                model: model.to_string(),
+                message: message.to_string(),
+            }
+            .into());
         }
         return Err(anyhow!("the Gemini API rejected the request ({status}): {message}"));
     }
@@ -964,6 +1084,118 @@ mod tests {
         assert_eq!(asked_wait_header(&headers), None, "and neither does a negative");
 
         assert_eq!(asked_wait_body(&serde_json::json!({ "error": {} })), None);
+    }
+
+    /// The failure that started this: Gemini sheds load on a newly released model as a
+    /// 503, which no amount of retrying one name gets past. The next candidate does.
+    #[test]
+    fn a_model_out_of_capacity_gives_way_to_the_next() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let outcome = walking(
+            &["gemini-3.5-flash", "gemini-3.6-flash"],
+            Duration::ZERO,
+            ignore_retries,
+            |model| {
+                asked.borrow_mut().push(model.to_string());
+                if model == "gemini-3.5-flash" {
+                    return Err(Busy {
+                        provider: "the Gemini API",
+                        status: 503,
+                        message: "high demand".to_string(),
+                        retry_after: None,
+                    }
+                    .into());
+                }
+                Ok("summary")
+            },
+        );
+
+        let (value, model) = outcome.expect("the second model should have answered");
+        assert_eq!(value, "summary");
+        assert_eq!(model, "gemini-3.6-flash", "the model that answered is returned");
+        assert_eq!(
+            asked.borrow().len(),
+            SEND_ATTEMPTS as usize + 1,
+            "the first is retried to exhaustion before the second is tried at all"
+        );
+    }
+
+    /// A retired name is not a capacity problem, but it is equally not a verdict on the
+    /// request — so it moves on too, which is what keeps a pinned id from rotting.
+    #[test]
+    fn a_retired_model_gives_way_to_the_next() {
+        let outcome = walking(&["gone", "here"], Duration::ZERO, ignore_retries, |model| {
+            if model == "gone" {
+                return Err(ModelGone {
+                    provider: "the Gemini API",
+                    model: model.to_string(),
+                    message: "not found".to_string(),
+                }
+                .into());
+            }
+            Ok(())
+        });
+
+        assert_eq!(outcome.expect("the second model should have answered").1, "here");
+    }
+
+    /// A rejection is the provider's verdict on what was sent. Walking the whole list
+    /// would upload the transcript once per model to collect the same answer.
+    #[test]
+    fn a_rejected_request_stops_at_the_first_model() {
+        let asked = Cell::new(0u32);
+        let outcome: Result<((), &str)> =
+            walking(&["one", "two"], Duration::ZERO, ignore_retries, |_| {
+            asked.set(asked.get() + 1);
+            Err(anyhow!("the Gemini API rejected the request (401): bad key"))
+        });
+
+        assert!(outcome.is_err());
+        assert_eq!(asked.get(), 1, "a bad key must not be tried against every model");
+    }
+
+    /// Told only about the last model, an out-of-capacity provider reads as one broken
+    /// model — and the user goes looking for a setting to change.
+    #[test]
+    fn every_model_tried_is_named_when_none_answer() {
+        let outcome: Result<((), &str)> = walking(
+            &["gemini-3.5-flash", "gemini-flash-latest"],
+            Duration::ZERO,
+            ignore_retries,
+            |_| {
+                Err(Busy {
+                    provider: "the Gemini API",
+                    status: 503,
+                    message: "high demand".to_string(),
+                    retry_after: None,
+                }
+                .into())
+            },
+        );
+
+        let error = format!("{:#}", outcome.expect_err("nothing answered"));
+        assert!(error.contains("gemini-3.5-flash"), "{error}");
+        assert!(error.contains("gemini-flash-latest"), "{error}");
+    }
+
+    /// The alias is the backstop and must stay last: it is hot-swapped to whatever Google
+    /// shipped most recently, which is the model most likely to be shedding load.
+    #[test]
+    fn the_alias_is_the_last_resort_not_the_first_choice() {
+        assert_eq!(
+            GEMINI_MODELS.last(),
+            Some(&"gemini-flash-latest"),
+            "the alias belongs at the end of the list"
+        );
+        assert_eq!(
+            DEFAULT_GEMINI_MODEL, GEMINI_MODELS[0],
+            "the name shown should be the one tried first"
+        );
+        assert!(
+            !GEMINI_MODELS.iter().any(|model| model.contains("preview")
+                || model.contains("exp")),
+            "a preview model is capacity-starved by definition and must not be a default"
+        );
     }
 
     /// The cap exists so a provider asking for minutes cannot leave the user in front of

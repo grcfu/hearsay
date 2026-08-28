@@ -378,6 +378,35 @@ model reads and in rendered action items.
 Structure is enforced by a JSON schema on both providers, so summaries are never parsed
 out of prose.
 
+### The model is a list, not a name
+
+Naming one Gemini model fails in both available directions, so Hearsay tries several in
+order and uses the first that answers.
+
+- **A pinned version rots.** `gemini-2.5-flash` was pinned and stopped being offered to
+  new keys within weeks.
+- **An alias rides whatever Google shipped last week.** `gemini-flash-latest` was the fix
+  for that, and it is hot-swapped to the newest Flash release — *including a preview or
+  experimental one*. A newly released model is capacity-starved for its first weeks and
+  the API sheds that load as 503 "this model is currently experiencing high demand". That
+  is server-side and Google-wide: not the key, not the request, and not something a paid
+  tier or a longer backoff fixes.
+
+So a mature stable release is tried first — summarising is not a frontier task, which is
+the same reason §8a picks Flash over Pro — and **the alias stays last**, as the backstop
+that cannot rot. A 503 that survives all three attempts, or a 404 for a name that has been
+retired, moves to the next candidate; **any other rejection stops the walk**, because a bad
+key or an over-long transcript would be rejected identically by every model and trying
+them all would upload the transcript once per model to learn the same thing.
+
+**`events.model_used` records the model that answered, not the one asked first** — they
+differ whenever the first choice was out of capacity, and a summary whose provenance is a
+guess cannot be compared against another later.
+
+When nothing answers, **the failure names every model tried.** Told only about the last,
+an out-of-capacity provider reads as one broken model, and the user goes looking for a
+setting to change instead of waiting.
+
 ### A busy provider is a wait, not a rejection
 
 Both providers shed load, and they say so with a status: 503 from Gemini, 529 from

@@ -105,7 +105,7 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64, question_id: i64, que
             })
             .collect();
 
-        let model = Provider::current().default_model();
+        let models = Provider::current().models();
         let speaker = db.preference(SPEAKER_NAME_KEY)?;
         // §8b: a question that fails is withdrawn, so the person is sitting in front of
         // an empty box waiting. Say that the provider is busy rather than letting the
@@ -115,7 +115,7 @@ fn run(app: &AppHandle, db: &Arc<Database>, event_id: i64, question_id: i64, que
             &markers,
             &history,
             question,
-            model,
+            models,
             speaker.as_deref(),
             |notice| {
                 let _ = app.emit(
