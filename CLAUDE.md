@@ -429,12 +429,20 @@ reasoning. The model reorganises text it has been handed, under a schema that al
 fixes the shape of the answer, and is told not to infer anything the transcript does not
 say. Not `minimal`, because the action items do need it to work out who committed to what.
 
-`thinkingLevel` arrived with Gemini 3.x, so an older candidate in the model list answers a
-request carrying it with a 400 naming the field. **That is a rejection of the hint, not of
-the transcript, and earns exactly one more send without it** — matched on the field name,
-so a genuine `INVALID_ARGUMENT` is still reported. It is deliberately not folded into the
-busy-provider retry: that exists for a provider which never looked at the request, and
-this is one that looked and objected to a single field.
+**The field is nested inside `thinkingConfig`, not set beside `maxOutputTokens`.** Put
+flat in `generationConfig` it is rejected as an unknown name — and because that reads as
+the hint being refused, the request is quietly sent again without it, the model runs at its
+default medium, and nothing on screen says the hint was dropped. A silent return to the
+behaviour the hint existed to prevent.
+
+`thinkingLevel` arrived with Gemini 3.x; before it the same intent was `thinkingBudget`, a
+token ceiling. The API rejects the wrong one with a 400 naming the field and refuses both
+at once, so **the dialects are tried in turn, newest first**, rather than the intent being
+abandoned at the first refusal. Only a model that takes neither is sent a request with no
+hint — still worth sending, just slower. Matched on the field name, so a genuine
+`INVALID_ARGUMENT` is still reported, and deliberately not folded into the busy-provider
+retry: that exists for a provider which never looked at the request, and this is one that
+looked and objected to a single field.
 
 ### What a summary pass can honestly report
 

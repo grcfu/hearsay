@@ -67,53 +67,6 @@ pub const DEFAULT_GEMINI_MODEL: &str = GEMINI_MODELS[0];
 /// is worse than a slow one.
 const MAX_TOKENS: u32 = 16_000;
 
-/// How much thinking to ask a Gemini model for.
-///
-/// Gemini 3.x Flash defaults to *medium*, and on a transcript of any length that is the
-/// difference between a summary arriving in seconds and one arriving in minutes — with
-/// the thought tokens charged to the user's key either way.
-///
-/// Low rather than medium for the reason §8a already picks Flash over Pro: this is
-/// summarising, not reasoning. The model is being asked to reorganise text it has been
-/// handed, under a schema that already fixes the shape of the answer, and told explicitly
-/// not to infer anything the transcript does not say. Not `minimal`, because the action
-/// items do need the model to work out who committed to what.
-pub(crate) const THINKING_LEVEL: &str = "low";
-
-/// A model that would not accept the thinking hint.
-///
-/// `thinkingLevel` arrived with Gemini 3.x, and an older candidate in [`GEMINI_MODELS`]
-/// answers a request carrying it with a 400. That is a rejection of the hint and not of
-/// the transcript, so it is worth exactly one more send without it — where a genuine
-/// `INVALID_ARGUMENT` is still reported, because the match is on the field name.
-#[derive(Debug, thiserror::Error)]
-#[error("the model would not take the thinking hint: {message}")]
-pub(crate) struct ThinkingRejected {
-    pub message: String,
-}
-
-/// Whether a rejection is the model refusing the thinking hint rather than the request.
-pub(crate) fn rejected_the_thinking_hint(status: u16, message: &str) -> bool {
-    status == 400 && message.to_ascii_lowercase().contains("thinking")
-}
-
-/// One retry without the hint, for a model that does not know the field.
-///
-/// Not folded into `with_retry`: that exists for a provider which never looked at the
-/// request, and this is a provider that looked and objected to one field. Sending the
-/// same request again would collect the same objection.
-pub(crate) fn without_thinking_hint_on_refusal<T>(
-    mut attempt: impl FnMut(Option<&str>) -> Result<T>,
-) -> Result<T> {
-    match attempt(Some(THINKING_LEVEL)) {
-        Err(error) if error.downcast_ref::<ThinkingRejected>().is_some() => {
-            tracing::warn!("the model does not take a thinking level, sending without it");
-            attempt(None)
-        }
-        outcome => outcome,
-    }
-}
-
 /// Summaries of an hour-long meeting take a while. Well above the default so a long
 /// transcript does not fail on a client-side timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -140,6 +93,89 @@ const RETRY_BACKOFF: Duration = Duration::from_secs(5);
 /// three attempts are meant to be a blip absorbed rather than a queue joined. Past this
 /// the wait is capped and, if the provider is still busy, reported.
 const MAX_ASKED_WAIT: Duration = Duration::from_secs(30);
+
+/// How much thinking to ask a Gemini model for.
+///
+/// Gemini 3.x Flash defaults to *medium*, and on a transcript of any length that is the
+/// difference between a summary arriving in seconds and one that does not arrive inside
+/// the five-minute request timeout at all — with the thought tokens charged to the user's
+/// key either way.
+///
+/// Low rather than medium for the reason §8a already picks Flash over Pro: this is
+/// summarising, not reasoning. The model is being asked to reorganise text it has been
+/// handed, under a schema that already fixes the shape of the answer, and told explicitly
+/// not to infer anything the transcript does not say. Not `minimal`, because the action
+/// items do need the model to work out who committed to what.
+pub(crate) const THINKING_LEVEL: &str = "low";
+
+/// The same intent in the dialect Gemini 2.5 speaks: a ceiling on thought tokens rather
+/// than a named level. Small, not zero — zero disables thinking outright, and the action
+/// items are the one part of this that benefits from some.
+pub(crate) const THINKING_BUDGET: u32 = 1024;
+
+/// The number of ways of asking, including asking for nothing.
+pub(crate) const THINKING_DIALECTS: usize = 3;
+
+/// How thinking is requested, by dialect, newest first.
+///
+/// **The field is nested inside `thinkingConfig`, not set beside `maxOutputTokens`.** Put
+/// flat in `generationConfig` it is rejected as an unknown name, and because that reads as
+/// the hint being refused, the request is quietly sent again without it — the model then
+/// runs at its default *medium* and the whole point of the hint is lost with nothing on
+/// screen to say so. That is exactly the failure this comment exists to prevent
+/// recurring.
+///
+/// `thinkingLevel` arrived with Gemini 3.x; before it the same intent was `thinkingBudget`.
+/// The API rejects the wrong one with a 400 naming the field, and refuses both at once, so
+/// they are tried in turn rather than the intent being abandoned at the first refusal.
+/// Only a model that will not take either is sent a request with no hint.
+pub(crate) fn thinking_config(dialect: usize) -> Option<serde_json::Value> {
+    match dialect {
+        0 => Some(serde_json::json!({ "thinkingLevel": THINKING_LEVEL })),
+        1 => Some(serde_json::json!({ "thinkingBudget": THINKING_BUDGET })),
+        _ => None,
+    }
+}
+
+/// A model that would not accept the thinking hint it was given.
+///
+/// Its own kind of error because it says nothing about the transcript — only about the
+/// dialect the request was written in — so the next dialect is worth trying. Matched on
+/// the field name, so a genuine `INVALID_ARGUMENT` is still reported.
+#[derive(Debug, thiserror::Error)]
+#[error("the model would not take that thinking hint: {message}")]
+pub(crate) struct ThinkingRejected {
+    pub message: String,
+}
+
+/// Whether a rejection is the model refusing the thinking hint rather than the request.
+pub(crate) fn rejected_the_thinking_hint(status: u16, message: &str) -> bool {
+    status == 400 && message.to_ascii_lowercase().contains("thinking")
+}
+
+/// Sends the request in each thinking dialect in turn, stopping at the first accepted.
+///
+/// Not folded into `with_retry`: that exists for a provider which never looked at the
+/// request, and this is a provider that looked and objected to one field. Sending the
+/// identical request again would collect the identical objection.
+pub(crate) fn across_thinking_dialects<T>(
+    mut attempt: impl FnMut(Option<&serde_json::Value>) -> Result<T>,
+) -> Result<T> {
+    let mut last: Option<anyhow::Error> = None;
+
+    for dialect in 0..THINKING_DIALECTS {
+        let hint = thinking_config(dialect);
+        match attempt(hint.as_ref()) {
+            Err(error) if error.downcast_ref::<ThinkingRejected>().is_some() => {
+                tracing::warn!("thinking dialect {dialect} refused, trying the next: {error:#}");
+                last = Some(error);
+            }
+            outcome => return outcome,
+        }
+    }
+
+    Err(last.unwrap_or_else(|| anyhow!("no thinking dialect was tried")))
+}
 
 /// A provider that was too busy to look at the request.
 ///
@@ -641,7 +677,7 @@ fn summarize_anthropic(transcript: &str, model: &str, speaker: &str) -> Result<S
 /// the system prompt in `systemInstruction`, and the answer comes back nested under
 /// `candidates`. Only this function knows any of that.
 fn summarize_gemini(transcript: &str, model: &str, speaker: &str) -> Result<Summary> {
-    without_thinking_hint_on_refusal(|thinking| {
+    across_thinking_dialects(|thinking| {
         summarize_gemini_once(transcript, model, speaker, thinking)
     })
 }
@@ -650,7 +686,7 @@ fn summarize_gemini_once(
     transcript: &str,
     model: &str,
     speaker: &str,
-    thinking: Option<&str>,
+    thinking: Option<&serde_json::Value>,
 ) -> Result<Summary> {
     let key = secrets::gemini_key()?.ok_or_else(|| {
         anyhow!(
@@ -667,8 +703,9 @@ fn summarize_gemini_once(
         "responseMimeType": "application/json",
         "responseSchema": gemini_schema(),
     });
-    if let Some(level) = thinking {
-        generation_config["thinkingLevel"] = level.into();
+    // Nested, not beside `maxOutputTokens` — see `thinking_config`.
+    if let Some(hint) = thinking {
+        generation_config["thinkingConfig"] = hint.clone();
     }
 
     let request = serde_json::json!({
@@ -1181,11 +1218,12 @@ mod tests {
     /// the field. That is a rejection of the hint, not of the transcript — and the older
     /// candidates in the model list are exactly the ones that will do it.
     #[test]
-    fn a_model_that_will_not_take_the_thinking_hint_is_sent_the_request_without_it() {
+    fn a_model_that_will_not_take_one_thinking_dialect_is_offered_the_next() {
         let sent = std::cell::RefCell::new(Vec::new());
-        let outcome = without_thinking_hint_on_refusal(|thinking| {
-            sent.borrow_mut().push(thinking.map(str::to_string));
-            if thinking.is_some() {
+        let outcome = across_thinking_dialects(|thinking| {
+            sent.borrow_mut().push(thinking.cloned());
+            // As Gemini 2.5 does: it knows `thinkingBudget` and not `thinkingLevel`.
+            if thinking.and_then(|hint| hint.get("thinkingLevel")).is_some() {
                 return Err(ThinkingRejected {
                     message: "Unknown name \"thinkingLevel\"".to_string(),
                 }
@@ -1194,12 +1232,58 @@ mod tests {
             Ok("summary")
         });
 
-        assert_eq!(outcome.expect("the second send should have landed"), "summary");
+        assert_eq!(outcome.expect("the second dialect should have landed"), "summary");
         assert_eq!(
             *sent.borrow(),
-            vec![Some(THINKING_LEVEL.to_string()), None],
-            "the hint should be tried once, then dropped"
+            vec![
+                Some(serde_json::json!({ "thinkingLevel": THINKING_LEVEL })),
+                Some(serde_json::json!({ "thinkingBudget": THINKING_BUDGET })),
+            ],
+            "the newer dialect first, then the older one — not straight to no hint"
         );
+    }
+
+    /// The bug this ladder was written for: put flat in `generationConfig` the field is an
+    /// unknown name, the request is quietly resent without it, and the model runs at its
+    /// default medium with nothing on screen to say the hint was dropped.
+    #[test]
+    fn the_thinking_hint_is_nested_where_the_api_expects_it() {
+        let hint = thinking_config(0).expect("the first dialect names a level");
+        assert!(
+            hint.get("thinkingLevel").is_some(),
+            "the level belongs inside the thinkingConfig object: {hint}"
+        );
+        assert!(
+            thinking_config(1)
+                .expect("the second dialect names a budget")
+                .get("thinkingBudget")
+                .is_some(),
+            "the older dialect is a token budget"
+        );
+        assert!(
+            thinking_config(THINKING_DIALECTS - 1).is_none(),
+            "the last resort is no hint at all"
+        );
+    }
+
+    /// Every dialect refused means the model takes none of them — which is a request
+    /// worth sending anyway, just slower.
+    #[test]
+    fn a_model_that_refuses_every_dialect_is_still_sent_the_request() {
+        let sent = Cell::new(0u32);
+        let outcome: Result<&str> = across_thinking_dialects(|thinking| {
+            sent.set(sent.get() + 1);
+            if thinking.is_some() {
+                return Err(ThinkingRejected {
+                    message: "Unknown name".to_string(),
+                }
+                .into());
+            }
+            Ok("summary")
+        });
+
+        assert_eq!(outcome.expect("the hintless send should have landed"), "summary");
+        assert_eq!(sent.get(), THINKING_DIALECTS as u32);
     }
 
     /// One retry, not a loop, and only for that one field. Everything else the provider
@@ -1207,7 +1291,7 @@ mod tests {
     #[test]
     fn any_other_rejection_is_not_sent_again() {
         let sent = Cell::new(0u32);
-        let outcome: Result<()> = without_thinking_hint_on_refusal(|_| {
+        let outcome: Result<()> = across_thinking_dialects(|_| {
             sent.set(sent.get() + 1);
             Err(anyhow!("the Gemini API rejected the request (400): transcript too long"))
         });

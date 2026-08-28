@@ -19,8 +19,8 @@ use crate::db::Segment;
 use crate::secrets;
 use crate::summary::{
     asked_wait_body, asked_wait_header, is_transient, render_transcript, speaker_or_default,
-    across_models, rejected_the_thinking_hint, without_thinking_hint_on_refusal, Busy,
-    Marker, ModelGone, Provider, RetryNotice, ThinkingRejected,
+    across_models, across_thinking_dialects, rejected_the_thinking_hint, Busy, Marker,
+    ModelGone, Provider, RetryNotice, ThinkingRejected,
     API_URL, API_VERSION, FALLBACK_BETA, GEMINI_URL,
 };
 
@@ -227,7 +227,7 @@ fn ask_gemini(
     model: &str,
     speaker: &str,
 ) -> Result<String> {
-    without_thinking_hint_on_refusal(|thinking| {
+    across_thinking_dialects(|thinking| {
         ask_gemini_once(transcript, history, question, model, speaker, thinking)
     })
 }
@@ -238,7 +238,7 @@ fn ask_gemini_once(
     question: &str,
     model: &str,
     speaker: &str,
-    thinking: Option<&str>,
+    thinking: Option<&serde_json::Value>,
 ) -> Result<String> {
     let key = secrets::gemini_key()?.ok_or_else(|| {
         anyhow!(
@@ -262,8 +262,9 @@ fn ask_gemini_once(
     }));
 
     let mut generation_config = serde_json::json!({ "maxOutputTokens": MAX_TOKENS });
-    if let Some(level) = thinking {
-        generation_config["thinkingLevel"] = level.into();
+    // Nested, not beside `maxOutputTokens` — see `summary::thinking_config`.
+    if let Some(hint) = thinking {
+        generation_config["thinkingConfig"] = hint.clone();
     }
 
     let request = serde_json::json!({
