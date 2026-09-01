@@ -26,6 +26,7 @@ interface LiveStatus {
   system_peak: number;
   has_audio: boolean;
   silent_while_audio_playing: boolean;
+  others_playing: string[];
   system_silent_seconds: number;
   mic_silent_seconds: number;
   system_stalled_seconds: number;
@@ -218,12 +219,18 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
 
   const stalledSource = micStalled ? "mic" : tapSilentWhilePlaying ? "system" : null;
 
+  // The wrong app is selected: this tap is silent and something else has the speakers.
+  // Certain enough to interrupt for, and the only warning that would have caught the
+  // recording that prompted all of this — every other check asks about the target, and
+  // the target was the wrong one.
+  const wrongSource = recording ? (live?.others_playing ?? []) : [];
+
   // A guess. A minute with nothing audible looks exactly like an empty room, so this
   // stays dismissible and never stops the recording on its own.
   const silentTooLong =
     recording && !dismissedSilence && (live?.system_silent_seconds ?? 0) > 60;
 
-  const hardFault = stalledSource !== null;
+  const hardFault = stalledSource !== null || wrongSource.length > 0;
 
   // The window is usually behind the meeting app, so an in-window banner would go
   // unseen. Ask the system to surface it.
@@ -232,7 +239,12 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     const kind = hardFault ? "fault" : "quiet";
     if (warnedRef.current[kind]) return;
     warnedRef.current[kind] = true;
-    const [title, body] = hardFault
+    const [title, body] = wrongSource.length > 0
+      ? [
+          "Hearsay may be recording the wrong app",
+          `Nothing is coming from the app you picked, but ${wrongSource.join(", ")} is playing audio. Open Hearsay and start again with the right one.`,
+        ]
+      : hardFault
       ? [
           "Hearsay has stopped capturing",
           stalledSource === "mic"
@@ -252,7 +264,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
         // No notification permission is survivable — the in-window alert still shows.
       }
     })();
-  }, [silentTooLong, hardFault, stalledSource]);
+  }, [silentTooLong, hardFault, stalledSource, wrongSource]);
 
   // A recording that came back with nothing in it. The backend has always emitted this
   // and nothing ever listened, so the one moment the app could say "that meeting was not
@@ -480,9 +492,11 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     notices.push(
       <div className="bar-alert" key="stalled">
         <span>
-          {stalledSource === "mic"
-            ? "Your microphone has stopped. Nothing you say is being recorded."
-            : "Audio capture has stopped. The meeting is playing but nothing is reaching the file."}
+          {wrongSource.length > 0
+            ? `Nothing is coming from the app you picked, but ${wrongSource.join(", ")} is playing. This is probably recording the wrong app.`
+            : stalledSource === "mic"
+              ? "Your microphone has stopped. Nothing you say is being recorded."
+              : "Audio capture has stopped. The meeting is playing but nothing is reaching the file."}
         </span>
         <button type="button" className="button small" onClick={stop}>
           End recording
