@@ -159,6 +159,13 @@ pub struct RecordingOutcome {
     pub format: AudioFormat,
     /// False means every sample written was zero.
     pub produced_audio: bool,
+    /// Frames written in which every channel was zero.
+    ///
+    /// [`Self::produced_audio`] is a yes-or-no about the whole file, and a file can pass
+    /// it on a single notification chime while holding no speech at all — which is
+    /// exactly how a lost interview looked. This says *how much* of the recording is
+    /// silence, which is the figure that separates a quiet meeting from a failed one.
+    pub silent_frames: u64,
     /// Every stretch during which the microphone was writing zeros.
     pub mute_spans: Vec<MuteSpan>,
     /// Every stretch during which no microphone was open at all.
@@ -941,6 +948,20 @@ fn spawn_mic_reader(mut mic: MicSource, target_rate: u32, shared: Arc<Shared>) -
     Ok(Reader { handle, retire })
 }
 
+/// Frames in which every channel was zero.
+///
+/// Counted per frame rather than per sample so the figure means the same thing in mono
+/// and in stereo: in `conversation` the microphone channel is legitimately zero while
+/// nobody is speaking, and counting samples would report half of every such recording as
+/// silence.
+fn count_silent_frames(samples: &[f32], channels: usize) -> u64 {
+    let channels = channels.max(1);
+    samples
+        .chunks(channels)
+        .filter(|frame| frame.iter().all(|sample| *sample == 0.0))
+        .count() as u64
+}
+
 /// Where the meter sits after one tick, given where it sat before and the loudest sample
 /// that arrived during it.
 fn meter_level(previous: f32, arrival: f32) -> f32 {
@@ -965,6 +986,7 @@ fn spawn_writer(
         .name("hearsay-write".into())
         .spawn(move || {
             let mut produced_audio = false;
+            let mut silent_frames = 0u64;
             let mut next_echo_check = FIRST_ECHO_CHECK;
             let mut warned_about_drops = false;
             let mut mic_meter = 0.0f32;
@@ -1017,6 +1039,8 @@ fn spawn_writer(
                                 if samples.iter().any(|sample| *sample != 0.0) {
                                     produced_audio = true;
                                 }
+                                silent_frames +=
+                                    count_silent_frames(&samples, format.channels as usize);
                                 writer.write_samples(&samples)?;
 
                                 // Keep the tail for echo analysis. Only stereo has two
@@ -1192,6 +1216,8 @@ fn spawn_writer(
                     if samples.iter().any(|s| *s != 0.0) {
                         produced_audio = true;
                     }
+                    silent_frames +=
+                        count_silent_frames(&samples, writer.format().channels as usize);
                     writer.write_samples(&samples)?;
                 }
             }
@@ -1212,6 +1238,7 @@ fn spawn_writer(
                 // gained a microphone is stereo from that point on.
                 format: writer.format(),
                 produced_audio,
+                silent_frames,
                 mute_spans: Vec::new(),
                 no_microphone_spans: Vec::new(),
                 system_gaps: Vec::new(),
@@ -1219,6 +1246,38 @@ fn spawn_writer(
             })
         })
         .map_err(AudioError::Io)
+}
+
+#[cfg(test)]
+mod silence_accounting {
+    use super::count_silent_frames;
+
+    /// Per frame, not per sample. In conversation the mic channel is legitimately zero
+    /// while nobody is talking, and counting samples would call half of every such
+    /// recording silence.
+    #[test]
+    fn a_stereo_frame_with_one_live_channel_is_not_silent() {
+        // Mic silent, system audible — somebody else is talking.
+        let samples = [0.0, 0.4, 0.0, 0.5, 0.0, 0.6];
+        assert_eq!(count_silent_frames(&samples, 2), 0);
+    }
+
+    #[test]
+    fn only_frames_that_are_zero_throughout_are_counted() {
+        let samples = [0.0, 0.0, 0.0, 0.2, 0.0, 0.0];
+        assert_eq!(count_silent_frames(&samples, 2), 2);
+    }
+
+    #[test]
+    fn mono_counts_every_zero_sample() {
+        assert_eq!(count_silent_frames(&[0.0, 0.1, 0.0, 0.0], 1), 3);
+    }
+
+    /// A malformed channel count must not divide by zero or lose the frames.
+    #[test]
+    fn a_zero_channel_count_is_treated_as_mono() {
+        assert_eq!(count_silent_frames(&[0.0, 0.0], 0), 2);
+    }
 }
 
 #[cfg(test)]
@@ -1280,6 +1339,7 @@ mod tests {
             duration_ms: 1_000,
             format: AudioFormat::new(48_000, channels),
             produced_audio: true,
+            silent_frames: 0,
             mute_spans: Vec::new(),
             no_microphone_spans: Vec::new(),
             system_gaps: Vec::new(),
