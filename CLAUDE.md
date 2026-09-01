@@ -123,6 +123,38 @@ quiet success.
 On `SIGTERM` the helper stops the device, destroys the tap and aggregate device, flushes stdout,
 and exits 0.
 
+### Silence is judged over a window, never over the run
+
+**"Has this tap ever produced a sample" is not a question worth asking.** A cumulative
+count only grows, so one notification chime in the first seconds of a meeting leaves it
+above zero for the rest of the recording and permanently disarms every check built on
+it. A tap that dies twenty minutes in then runs to the end reporting success — which is
+this section's failure mode wearing a disguise, and it has cost a real meeting.
+
+So every silence check reads the count **over the last window**, and what is tracked is
+how long the tap has been handing back nothing but zeros, reset the moment a real sample
+arrives. This holds at all three layers that ask the question: the helper's own guard,
+the Rust status the meter reads, and the banner.
+
+- **A live alarm clears when audio returns.** A warning that cannot go away is one people
+  learn to ignore, and this one has to still mean something the next time it appears. The
+  longest outage is kept separately so the recording can still be judged afterwards.
+- **"Stopped producing" and "never produced" are different faults**, reported
+  differently. Sending someone to the permission settings for a tap that was working
+  wastes the only time they have.
+- **A device that has stopped delivering buffers at all is a stronger claim than
+  silence**, and the only one worth interrupting somebody for. Silence can be an empty
+  room; a source that has stopped is broken. Both are counted, because a banner driven by
+  silence alone either cries wolf whenever the room goes quiet or says nothing when the
+  device dies. Reporting a guess as a certainty trains people to ignore the certainty.
+- **A finished recording is judged by how much of it is silence**, not by whether it
+  holds a single non-zero sample. The second is satisfied by a stray chime.
+
+`--probe` answers the same question before a meeting rather than after, and reports the
+**share of the time** the tap was returning audio while something was provably playing —
+not whether it ever did. A probe against silence reports that it proved nothing rather
+than passing: the absence of evidence must never read as a pass.
+
 ---
 
 ## 4. Recording modes
@@ -139,6 +171,17 @@ The user attends info sessions where they never speak and may be talking to some
 Any code path that could construct a mic input in this mode is a defect.
 
 ### `conversation`
+
+**A microphone that opens and delivers nothing is a failed start, not a quiet one.**
+`cpal`'s `play()` returning `Ok` means the request was accepted; CoreAudio starts the IO
+context afterwards, and when that fails the error is logged inside CoreAudio and never
+surfaces. The stream then sits there delivering nothing and writes a whole meeting of
+digital silence to the left channel. So the device has to prove itself by handing over a
+buffer before the recording is allowed to proceed, and the recording is refused with an
+explanation if it does not.
+
+Buffers delivered are counted separately from non-zero samples, because a quiet room and
+a dead device produce identical audio and only the first figure tells them apart.
 
 Opens both and writes **one stereo WAV**:
 
