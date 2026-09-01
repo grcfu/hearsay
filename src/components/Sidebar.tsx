@@ -124,6 +124,10 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   const [scrubbed, setScrubbed] = useState<string | null>(null);
   const [meeting, setMeeting] = useState<{ id: string; title: string } | null>(null);
   const [dismissedSilence, setDismissedSilence] = useState(false);
+  const [silentResult, setSilentResult] = useState<{
+    share: number;
+    entirely: boolean;
+  } | null>(null);
 
   // Bar height is the user's to set. Persisted, because re-adjusting it on every launch
   // would make it a fidget rather than a preference.
@@ -233,6 +237,42 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
       }
     })();
   }, [silentTooLong, hardFault, stalledSource]);
+
+  // A recording that came back with nothing in it. The backend has always emitted this
+  // and nothing ever listened, so the one moment the app could say "that meeting was not
+  // recorded" — while it is still fresh enough to write down from memory — passed in
+  // silence. Not auto-dismissed: this is the most important thing the app can say.
+  useEffect(() => {
+    const unlisten = listen<{ silent_share: number; entirely_silent: boolean }>(
+      "recording-silent",
+      (message) =>
+        setSilentResult({
+          share: message.payload.silent_share,
+          entirely: message.payload.entirely_silent,
+        }),
+    );
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!silentResult) return;
+    void (async () => {
+      try {
+        let allowed = await isPermissionGranted();
+        if (!allowed) allowed = (await requestPermission()) === "granted";
+        if (allowed) {
+          sendNotification({
+            title: "That recording captured almost nothing",
+            body: "Write down what you remember now — the audio is not there to go back to.",
+          });
+        }
+      } catch {
+        // The in-window notice still shows.
+      }
+    })();
+  }, [silentResult]);
 
   // The scrub hotkey works while Hearsay is in the background, so confirmation has to
   // arrive by event. Silently erasing audio with no acknowledgement would leave the user
@@ -430,6 +470,27 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
         </span>
         <button type="button" className="button small" onClick={stop}>
           End recording
+        </button>
+      </div>,
+    );
+  }
+
+  if (silentResult) {
+    const percent = Math.round(silentResult.share * 100);
+    notices.push(
+      <div className="bar-alert" key="silent-result">
+        <span>
+          {silentResult.entirely
+            ? "That recording is silent from beginning to end."
+            : `That recording is ${percent}% silence — there is no meeting in it.`}{" "}
+          Write down what you remember now.
+        </span>
+        <button
+          type="button"
+          className="button small"
+          onClick={() => setSilentResult(null)}
+        >
+          Dismiss
         </button>
       </div>,
     );

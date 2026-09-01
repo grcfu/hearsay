@@ -246,18 +246,40 @@ pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> CommandResu
     }
     crate::tray::refresh(&app);
 
-    if !outcome.produced_audio {
-        // Never let this pass quietly. A file full of zeros is a failed recording, and
-        // the user has to hear about it while they still remember the meeting.
+    // A file that is almost entirely zeros is a failed recording even though it is not
+    // an empty one, and it used to pass silently: `produced_audio` is a yes-or-no, and
+    // four notification chimes in twenty-two minutes were enough to satisfy it while the
+    // meeting itself was never captured.
+    //
+    // The threshold is deliberately high. Long silences are ordinary — a talk with a
+    // quiet room, a listen-only recording of a session that had not started yet — so
+    // this fires only where there is so little audio that no meeting could be in there.
+    const MOSTLY_SILENT: f64 = 0.98;
+    let silent_share = if outcome.frames > 0 {
+        outcome.silent_frames as f64 / outcome.frames as f64
+    } else {
+        1.0
+    };
+
+    if !outcome.produced_audio || silent_share >= MOSTLY_SILENT {
+        // Never let this pass quietly. The user has to hear about it while they still
+        // remember the meeting well enough to write down what mattered.
         tracing::error!(
-            "recording {event_id} captured {} frames, every one of them silent",
-            outcome.frames
+            "recording {event_id} captured {} frames, {} of them silent ({:.1}%)",
+            outcome.frames,
+            outcome.silent_frames,
+            silent_share * 100.0
         );
         let _ = app.emit(
             "recording-silent",
             serde_json::json!({
                 "event_id": event_id,
                 "frames": outcome.frames,
+                "silent_frames": outcome.silent_frames,
+                "silent_share": silent_share,
+                // Nothing at all, or a handful of stray sounds in an empty file. The two
+                // read differently to somebody who watched a meter move and believed it.
+                "entirely_silent": !outcome.produced_audio,
             }),
         );
     }
