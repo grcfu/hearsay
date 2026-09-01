@@ -239,6 +239,7 @@ export function SettingsPane({ status, onStatusChange }: Props) {
               badText="Not set up — run ./python/setup_venv.sh"
             />
           </div>
+          <CaptureProbe />
         </section>
 
         <section style={{ marginBottom: 28 }}>
@@ -505,6 +506,82 @@ function PathRow({ label, path }: { label: string; path?: string }) {
           </button>
         </>
       ) : null}
+    </div>
+  );
+}
+
+/** What a probe found. Mirrors `ProbeReport` in `crates/hearsay-audio/src/helper.rs`. */
+interface ProbeReport {
+  verdict: string;
+  diagnosis: string;
+  coverage: number;
+  audio_was_playing: boolean;
+}
+
+/**
+ * Runs a real capture for a few seconds and says what came back.
+ *
+ * The permission row above can only say capture is *allowed*. This is the row that says
+ * it *works* — the distinction that cost a whole interview, where the permission read as
+ * granted for twenty-two minutes while the tap returned four notification chimes.
+ *
+ * Deliberately manual and deliberately explained. It opens a tap, so running it on a
+ * timer would be capturing audio nobody asked to capture.
+ */
+function CaptureProbe() {
+  const [running, setRunning] = useState(false);
+  const [report, setReport] = useState<ProbeReport | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const run = async () => {
+    setRunning(true);
+    setReport(null);
+    setFailure(null);
+    try {
+      // System-wide, so the check does not depend on having picked the right app first —
+      // picking the wrong one is among the things this is meant to catch.
+      setReport(await invoke<ProbeReport>("probe_audio_capture", { pids: [], seconds: 4 }));
+    } catch (error) {
+      setFailure(String(error));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const percent =
+    report && report.coverage >= 0 ? ` (${Math.round(report.coverage * 100)}% of the time)` : "";
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <p className="muted small" style={{ marginBottom: 8 }}>
+        Play the meeting audio, then check. A check against silence proves nothing, and
+        will say so rather than passing.
+      </p>
+      <button type="button" className="button small" onClick={() => void run()} disabled={running}>
+        {running ? "Listening for four seconds…" : "Check capture now"}
+      </button>
+      {failure && (
+        <p className="banner problem" style={{ marginTop: 10 }}>
+          The check could not run: {failure}
+        </p>
+      )}
+      {report && (
+        <p
+          className={report.verdict === "capturing" ? "banner" : "banner problem"}
+          style={{ marginTop: 10 }}
+        >
+          <strong>
+            {report.verdict === "capturing"
+              ? `Capturing${percent}.`
+              : report.verdict === "intermittent"
+                ? `Capturing only intermittently${percent}.`
+                : report.verdict === "no_audio_playing"
+                  ? "Nothing was playing."
+                  : "Not capturing."}
+          </strong>{" "}
+          {report.diagnosis}
+        </p>
+      )}
     </div>
   );
 }
