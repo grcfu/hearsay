@@ -110,6 +110,14 @@ pub struct RecordingStatus {
     /// Kept apart from the system figure because they fail for unrelated reasons and
     /// a combined one would hide whichever channel was still working.
     pub mic_silent_seconds: f64,
+    /// Seconds the system tap has gone without handing over a buffer *at all*.
+    ///
+    /// The stronger claim, and the one worth interrupting somebody for. Silence can be
+    /// an empty room; a device that has stopped delivering is broken, and nothing said
+    /// from here on is being recorded.
+    pub system_stalled_seconds: f64,
+    /// The same for the microphone. Zero whenever no microphone is open.
+    pub mic_stalled_seconds: f64,
     /// The helper reported capturing zeros while audio was provably playing.
     pub silent_while_audio_playing: bool,
     /// The system tap could not be restarted after a mode switch, so the recording is
@@ -220,6 +228,14 @@ struct Shared {
     recheck_echo: AtomicBool,
     /// Samples the microphone erased before they reached disk.
     scrubbed_samples: AtomicU64,
+    /// Buffers each reader has taken from its source, silent ones included.
+    ///
+    /// The writer compares these across ticks. A figure that stops moving means the
+    /// device stopped delivering; one that climbs while the meter reads zero is a quiet
+    /// room. Reporting the second as the first would tell somebody their microphone had
+    /// failed every time they stopped talking.
+    mic_buffers: AtomicU64,
+    system_buffers: AtomicU64,
     /// The most recently committed stereo audio, kept for echo analysis.
     analysis: Mutex<Vec<f32>>,
 }
@@ -328,6 +344,8 @@ impl Recording {
             stop: AtomicBool::new(false),
             recheck_echo: AtomicBool::new(false),
             scrubbed_samples: AtomicU64::new(0),
+            mic_buffers: AtomicU64::new(0),
+            system_buffers: AtomicU64::new(0),
             analysis: Mutex::new(Vec::new()),
         });
 
@@ -863,6 +881,7 @@ fn spawn_system_reader(
                         if let Ok(mut mixer) = shared.mixer.lock() {
                             mixer.push(Channel::System, &aligned);
                         }
+                        shared.system_buffers.fetch_add(1, Ordering::Relaxed);
                         if let Ok(mut status) = shared.status.lock() {
                             if !status.has_audio && aligned.iter().any(|s| *s != 0.0) {
                                 status.has_audio = true;
@@ -901,6 +920,7 @@ fn spawn_mic_reader(mut mic: MicSource, target_rate: u32, shared: Arc<Shared>) -
                         let aligned = resample_mono(&samples, mic_rate, target_rate);
                         let heard = aligned.iter().any(|s| *s != 0.0);
 
+                        shared.mic_buffers.fetch_add(1, Ordering::Relaxed);
                         if let Ok(mut mixer) = shared.mixer.lock() {
                             mixer.push(Channel::Mic, &aligned);
                         }
@@ -951,6 +971,10 @@ fn spawn_writer(
             let mut system_meter = 0.0f32;
             let mut system_silent_seconds = 0.0f64;
             let mut mic_silent_seconds = 0.0f64;
+            let mut system_stalled_seconds = 0.0f64;
+            let mut mic_stalled_seconds = 0.0f64;
+            let mut last_mic_buffers = 0u64;
+            let mut last_system_buffers = 0u64;
 
             loop {
                 let stopping = shared.stop.load(Ordering::Relaxed);
@@ -1054,10 +1078,30 @@ fn spawn_writer(
                 // meter falls gradually by design, and a decaying tail would keep
                 // resetting the count and hide a tap that had already stopped.
                 let tick = WRITE_INTERVAL.as_secs_f64();
+                let mic_buffers = shared.mic_buffers.load(Ordering::Relaxed);
+                let system_buffers = shared.system_buffers.load(Ordering::Relaxed);
+                // A device that has stopped handing over buffers at all is broken. One
+                // still handing over buffers that happen to be quiet is a quiet room,
+                // and saying otherwise would report a failure every time nobody spoke.
+                let system_stalled = system_buffers == last_system_buffers;
+                let mic_stalled = stereo && mic_buffers == last_mic_buffers;
+                last_system_buffers = system_buffers;
+                last_mic_buffers = mic_buffers;
+
                 if system_arrival > 0.0 {
                     system_silent_seconds = 0.0;
                 } else {
                     system_silent_seconds += tick;
+                }
+                if system_stalled {
+                    system_stalled_seconds += tick;
+                } else {
+                    system_stalled_seconds = 0.0;
+                }
+                if mic_stalled {
+                    mic_stalled_seconds += tick;
+                } else {
+                    mic_stalled_seconds = 0.0;
                 }
                 // Only counted while a microphone is actually open. In listen-only there
                 // is nothing to be silent, and counting anyway would report a fault
@@ -1081,6 +1125,8 @@ fn spawn_writer(
                     status.losing_audio = losing_audio;
                     status.system_silent_seconds = system_silent_seconds;
                     status.mic_silent_seconds = mic_silent_seconds;
+                    status.system_stalled_seconds = system_stalled_seconds;
+                    status.mic_stalled_seconds = mic_stalled_seconds;
                 }
 
                 // A switch to conversation asks for the check to come round again soon:
