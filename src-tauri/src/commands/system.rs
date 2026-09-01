@@ -6,7 +6,7 @@
 //! say which one to do something about, instead of "something went wrong".
 
 use crate::state::CommandResult;
-use hearsay_audio::helper;
+use hearsay_audio::helper::{self, ProbeReport, TapTarget};
 use hearsay_audio::process::{audible_apps, AudibleApp};
 use hearsay_core::transcribe::SidecarPaths;
 use serde::Serialize;
@@ -65,4 +65,23 @@ pub fn request_audio_permission() -> CommandResult<bool> {
 pub fn list_audible_apps() -> CommandResult<Vec<AudibleApp>> {
     let processes = helper::list_processes()?;
     Ok(audible_apps(&processes))
+}
+
+/// Runs a short real capture against a chosen app and reports what it found.
+///
+/// `system_status` can only say whether capture is *permitted*. That is not the same as
+/// whether it works: the permission can read as granted while the tap returns nothing,
+/// which is the failure mode §3 is written around and the one that costs a whole
+/// meeting before anyone notices. This opens a real tap and looks.
+///
+/// Meant to be run with the meeting audio already playing — a probe against silence
+/// proves nothing, and says so rather than passing.
+#[tauri::command]
+pub fn probe_audio_capture(pids: Vec<i32>, seconds: Option<f64>) -> CommandResult<ProbeReport> {
+    let target = if pids.is_empty() {
+        TapTarget::SystemWide
+    } else {
+        TapTarget::Processes(pids)
+    };
+    Ok(helper::probe_capture(target, seconds.unwrap_or(4.0))?)
 }

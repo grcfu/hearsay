@@ -62,6 +62,7 @@ pub fn run() {
             commands::version::update_status,
             commands::system::request_audio_permission,
             commands::system::list_audible_apps,
+            commands::system::probe_audio_capture,
             commands::recording::start_recording,
             commands::recording::stop_recording,
             commands::recording::recording_status,
