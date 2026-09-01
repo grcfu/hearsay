@@ -370,19 +370,44 @@ func probe(_ options: Options) throws -> Int32 {
     try session.start(target: target)
 
     var audioWasPlaying = false
+    // Slices with real audio in them, out of slices where something was playing. A tap
+    // that catches one notification chime and nothing else would pass a bare
+    // "any non-zero sample" test while being useless for a meeting, so what is measured
+    // is how much of the time it was working — not whether it ever worked.
+    var slicesWhilePlaying = 0
+    var slicesWithAudio = 0
     let started = Date()
     while Date().timeIntervalSince(started) < duration, !signals.shouldStop {
-        if anyTargetProducingOutput(target) { audioWasPlaying = true }
         Thread.sleep(forTimeInterval: 0.25)
+        let playing = anyTargetProducingOutput(target)
+        if playing { audioWasPlaying = true }
+        let slice = session.snapshot(resetInterval: true)
+        if playing {
+            slicesWhilePlaying += 1
+            if slice.intervalNonZeroSamples > 0 { slicesWithAudio += 1 }
+        }
     }
     session.stop()
 
     let stats = session.snapshot()
+    // Undefined rather than zero when nothing ever played: a coverage of 0 out of 0
+    // slices is not evidence of a broken tap, and reporting it as such would send
+    // someone to fix a tap that was never asked for anything.
+    let coverage: Double? =
+        slicesWhilePlaying > 0 ? Double(slicesWithAudio) / Double(slicesWhilePlaying) : nil
+
     let verdict: String
     let diagnosis: String
     let code: Int32
 
-    if stats.nonZeroSamples > 0 {
+    if let coverage, coverage < 0.5, stats.nonZeroSamples > 0 {
+        verdict = "intermittent"
+        diagnosis =
+            "the tap returned audio for only \(Int(coverage * 100))% of the time something "
+            + "was playing. It is catching some sound but not a conversation — expect "
+            + "long silent stretches in the recording."
+        code = 75
+    } else if stats.nonZeroSamples > 0 {
         verdict = "capturing"
         diagnosis = "the tap is producing real audio"
         code = 0
@@ -412,6 +437,7 @@ func probe(_ options: Options) throws -> Int32 {
         "diagnosis": diagnosis,
         "permission_preflight": preflight,
         "audio_was_playing": audioWasPlaying,
+        "coverage": coverage ?? -1,
         "duration_seconds": duration,
         "sample_rate": session.format.mSampleRate,
         "channels": Int(session.format.mChannelsPerFrame),
