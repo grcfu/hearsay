@@ -279,11 +279,17 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     }
   }, []);
 
+  // Polled only while idle. Each refresh spawns a helper process that initialises the
+  // CoreAudio HAL, and the picked source is read once at `start` and never again — so
+  // during a recording this is hundreds of processes (335 in one twenty-two minute
+  // meeting) churning the very subsystem the live tap depends on, to refresh a list
+  // nothing can act on. The list is refreshed once when the recording ends.
   useEffect(() => {
     void refreshApps();
+    if (recording) return;
     const timer = window.setInterval(() => void refreshApps(), 4000);
     return () => window.clearInterval(timer);
-  }, [refreshApps]);
+  }, [refreshApps, recording]);
 
   const start = async () => {
     setBusy(true);
