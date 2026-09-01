@@ -89,6 +89,13 @@ pub enum HelperEvent {
         /// Whether the run was still silent when it ended.
         ended_silent: bool,
     },
+    /// The tapped app is silent while something else on the machine is playing audio.
+    /// The signature of a tap pointed at the wrong source.
+    WrongSource {
+        silent_seconds: f64,
+        others_playing: Vec<String>,
+        message: String,
+    },
     Error { kind: String, message: String },
     /// Permission looks missing, but capture is proceeding anyway. Advisory: the
     /// silence check is what actually decides whether a recording is real.
@@ -115,6 +122,13 @@ pub struct HelperStatus {
     /// Sticky: the worst outage this run has seen, so a recording can be judged at the
     /// end even if the tap recovered before anyone looked.
     pub longest_silence_seconds: f64,
+    /// Apps playing audio that this tap is not following.
+    ///
+    /// Empty in the ordinary case. Non-empty means the tapped app has been silent for a
+    /// while and something else has the speakers, which no other check can see: the
+    /// silence guard asks whether the *target* is playing, so a tap on the wrong app
+    /// stays quiet exactly when it is most wrong.
+    pub others_playing: Vec<String>,
 }
 
 /// Locates the helper binary.
@@ -374,6 +388,14 @@ impl HelperSource {
         }
     }
 
+    /// Apps playing audio that this tap is not following, if the helper has noticed any.
+    pub fn others_playing(&self) -> Vec<String> {
+        self.status
+            .lock()
+            .map(|status| status.others_playing.clone())
+            .unwrap_or_default()
+    }
+
     /// True once the helper reported capturing zeros while audio was provably playing.
     pub fn is_silently_failing(&self) -> bool {
         self.status
@@ -528,11 +550,23 @@ fn spawn_stderr_reader(
                                 status.silent_while_audio_playing = false;
                                 status.silent_seconds = 0.0;
                                 status.captured_audio_earlier = true;
+                                // The target is producing audio, so it is the right one.
+                                status.others_playing.clear();
                             }
                         }
                     }
                     HelperEvent::PermissionWarning { message } => {
                         tracing::warn!("{message}");
+                    }
+                    HelperEvent::WrongSource {
+                        message,
+                        others_playing,
+                        ..
+                    } => {
+                        tracing::warn!("audio helper suspects the wrong source: {message}");
+                        if let Ok(mut status) = status.lock() {
+                            status.others_playing = others_playing.clone();
+                        }
                     }
                     HelperEvent::Silence {
                         message,
@@ -614,6 +648,20 @@ fn parse_event(line: &str) -> HelperEvent {
             nonzero_samples: number("nonzero_samples").unwrap_or(0.0) as u64,
             silent_while_playing_seconds: number("silent_while_playing_seconds").unwrap_or(0.0),
             ended_silent: flag("ended_silent"),
+        },
+        "wrong_source" => HelperEvent::WrongSource {
+            silent_seconds: number("silent_seconds").unwrap_or(0.0),
+            others_playing: value
+                .get("others_playing")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            message: text("message"),
         },
         "error" => HelperEvent::Error {
             kind: text("kind"),

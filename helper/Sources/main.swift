@@ -195,6 +195,29 @@ func anyTargetProducingOutput(_ target: TapTarget) -> Bool {
     }
 }
 
+/// Processes other than the tap's targets that are currently playing audio.
+///
+/// The question `anyTargetProducingOutput` cannot ask. When a process-scoped tap returns
+/// nothing, that is either a quiet meeting or a tap pointed at the wrong app, and the
+/// two look identical from inside the target. What separates them is whether *something
+/// else* on the machine is playing: a silent target while another app has the speakers
+/// is the signature of the wrong source having been picked.
+///
+/// Hearsay's own processes are excluded — the app and this helper both register with
+/// Core Audio, and counting them would make every silent recording look misconfigured.
+func othersProducingOutput(_ target: TapTarget) -> [AudioProcess] {
+    guard case let .processes(wanted) = target else { return [] }
+    guard let processes = try? allAudioProcesses() else { return [] }
+
+    let targeted = Set(wanted.map(\.pid))
+    let selfPID = ProcessInfo.processInfo.processIdentifier
+    let parentPID = getppid()
+    return processes.filter {
+        $0.isRunningOutput && !targeted.contains($0.pid) && $0.pid != selfPID
+            && $0.pid != parentPID
+    }
+}
+
 // MARK: - Permission
 
 func checkPermission(_ options: Options) {
@@ -256,6 +279,7 @@ func capture(_ options: Options) throws {
     var everProducedAudio = false
     var lastReport = started
     var lastSilenceTally = started
+    var lastWrongSourceWarning: Date?
 
     while true {
         if signals.shouldStop {
@@ -322,6 +346,29 @@ func capture(_ options: Options) throws {
                             "silent_seconds": silentSeconds,
                             "captured_audio_earlier": everProducedAudio,
                             "message": message,
+                        ])
+                }
+            }
+            // A process-scoped tap returning nothing while another app has the speakers
+            // is the signature of the wrong source: the recording will be silent, and
+            // nothing else in the app is in a position to notice. Reported on the same
+            // schedule as the silence warning so it cannot become a stream.
+            if silentSeconds >= silenceGraceSeconds, !anyTargetProducingOutput(target) {
+                let others = othersProducingOutput(target)
+                if !others.isEmpty, lastWrongSourceWarning
+                    .map({ now.timeIntervalSince($0) >= silenceRepeatSeconds }) ?? true
+                {
+                    lastWrongSourceWarning = now
+                    let names = others.compactMap { $0.name }.prefix(3)
+                    emit(
+                        "wrong_source",
+                        [
+                            "silent_seconds": silentSeconds,
+                            "others_playing": Array(names),
+                            "message":
+                                "the tapped app has been silent for \(Int(silentSeconds))s "
+                                + "while \(names.joined(separator: ", ")) is playing audio — "
+                                + "this may be recording the wrong app",
                         ])
                 }
             }

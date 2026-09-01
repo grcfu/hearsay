@@ -128,6 +128,12 @@ pub struct RecordingStatus {
     pub mic_stalled_seconds: f64,
     /// The helper reported capturing zeros while audio was provably playing.
     pub silent_while_audio_playing: bool,
+    /// Apps playing audio that the tap is not following.
+    ///
+    /// The one signal that can catch a tap pointed at the wrong app, which is otherwise
+    /// invisible: every other check asks whether the *target* is playing, so a tap on
+    /// the wrong source stays quiet precisely when it is most wrong.
+    pub others_playing: Vec<String>,
     /// The system tap could not be restarted after a mode switch, so the recording is
     /// carrying on with the microphone alone.
     ///
@@ -902,11 +908,13 @@ fn spawn_system_reader(
                                 status.has_audio = true;
                             }
                             status.silent_while_audio_playing = system.is_silently_failing();
+                            status.others_playing = system.others_playing();
                         }
                     }
                     Chunk::Idle => {
                         if let Ok(mut status) = shared.status.lock() {
                             status.silent_while_audio_playing = system.is_silently_failing();
+                            status.others_playing = system.others_playing();
                         }
                     }
                     Chunk::Finished => break,
