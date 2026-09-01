@@ -128,6 +128,14 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     share: number;
     entirely: boolean;
   } | null>(null);
+  // At most one desktop notification of each kind per recording. The conditions behind
+  // them can lift and return — a tap goes quiet whenever the meeting pauses — and a
+  // notification that arrives on every pause is one the user turns off, taking the
+  // occasion that actually mattered with it.
+  const warnedRef = useRef<{ quiet: boolean; fault: boolean }>({
+    quiet: false,
+    fault: false,
+  });
 
   // Bar height is the user's to set. Persisted, because re-adjusting it on every launch
   // would make it a fidget rather than a preference.
@@ -184,6 +192,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   useEffect(() => {
     if (recording) setMeeting(null);
     else setDismissedSilence(false);
+    warnedRef.current = { quiet: false, fault: false };
   }, [recording]);
 
   // Three different claims, in descending order of how sure Hearsay can be. They are
@@ -220,6 +229,9 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   // unseen. Ask the system to surface it.
   useEffect(() => {
     if (!silentTooLong && !hardFault) return;
+    const kind = hardFault ? "fault" : "quiet";
+    if (warnedRef.current[kind]) return;
+    warnedRef.current[kind] = true;
     const [title, body] = hardFault
       ? [
           "Hearsay has stopped capturing",
