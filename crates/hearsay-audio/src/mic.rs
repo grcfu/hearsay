@@ -261,6 +261,10 @@ impl AudioSource for MicSource {
     fn has_produced_audio(&self) -> bool {
         self.nonzero_samples() > 0
     }
+
+    fn delivered_buffers(&self) -> u64 {
+        self.delivered_buffers()
+    }
 }
 
 impl Drop for MicSource {

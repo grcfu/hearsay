@@ -80,4 +80,13 @@ pub trait AudioSource: Send {
     /// all of them zero. Every source reports this so a recording can never end without
     /// someone having asked the question.
     fn has_produced_audio(&self) -> bool;
+
+    /// Buffers this source has handed over, silent ones included.
+    ///
+    /// The companion to [`AudioSource::has_produced_audio`], and the reason both exist:
+    /// a silent room and a stopped device produce identical audio, and only this figure
+    /// tells them apart. Standing still while a recording runs means the device has
+    /// stopped delivering — the fault worth reporting — where a flat but climbing count
+    /// is just a quiet room, which is not a fault at all.
+    fn delivered_buffers(&self) -> u64;
 }

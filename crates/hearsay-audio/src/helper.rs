@@ -203,6 +203,9 @@ pub struct HelperSource {
     events: Arc<Mutex<Vec<HelperEvent>>>,
     status: Arc<Mutex<HelperStatus>>,
     nonzero_samples: Arc<AtomicU64>,
+    /// Buffers read off the helper's stdout, silent ones included. See
+    /// [`AudioSource::delivered_buffers`].
+    delivered_buffers: Arc<AtomicU64>,
     finished: Arc<AtomicBool>,
     readers: Vec<JoinHandle<()>>,
     stopped: bool,
@@ -272,10 +275,12 @@ impl HelperSource {
         };
 
         let (audio_tx, audio_rx) = sync_channel::<Vec<f32>>(CHANNEL_DEPTH);
+        let delivered_buffers = Arc::new(AtomicU64::new(0));
         let stdout_thread = spawn_stdout_reader(
             stdout,
             audio_tx,
             Arc::clone(&nonzero_samples),
+            Arc::clone(&delivered_buffers),
             Arc::clone(&finished),
         );
 
@@ -286,6 +291,7 @@ impl HelperSource {
             events,
             status,
             nonzero_samples,
+            delivered_buffers,
             finished,
             readers: vec![stderr_thread, stdout_thread],
             stopped: false,
@@ -318,6 +324,11 @@ impl HelperSource {
 
     pub fn nonzero_samples(&self) -> u64 {
         self.nonzero_samples.load(Ordering::Relaxed)
+    }
+
+    /// Buffers read off the helper's stdout, silent ones included.
+    pub fn delivered_buffers(&self) -> u64 {
+        self.delivered_buffers.load(Ordering::Relaxed)
     }
 }
 
@@ -374,6 +385,10 @@ impl AudioSource for HelperSource {
             let _ = reader.join();
         }
         Ok(())
+    }
+
+    fn delivered_buffers(&self) -> u64 {
+        self.delivered_buffers.load(Ordering::Relaxed)
     }
 
     fn has_produced_audio(&self) -> bool {
@@ -562,6 +577,7 @@ fn spawn_stdout_reader(
     mut stdout: std::process::ChildStdout,
     audio: SyncSender<Vec<f32>>,
     nonzero_samples: Arc<AtomicU64>,
+    delivered_buffers: Arc<AtomicU64>,
     finished: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
@@ -601,6 +617,10 @@ fn spawn_stdout_reader(
                     samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
                 }
                 carry.extend_from_slice(&bytes[whole..]);
+
+                // Unconditional: this is the proof the tap is still delivering, and it
+                // must not depend on anything being audible.
+                delivered_buffers.fetch_add(1, Ordering::Relaxed);
 
                 let counted = samples.iter().filter(|sample| **sample != 0.0).count() as u64;
                 if counted > 0 {
