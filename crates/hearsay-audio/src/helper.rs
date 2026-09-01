@@ -175,6 +175,66 @@ pub fn list_processes() -> Result<Vec<AudioProcess>> {
     })
 }
 
+/// What a capture probe found. See [`probe_capture`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProbeReport {
+    /// `capturing`, `intermittent`, `silent_while_audio_playing`, `permission_denied`,
+    /// or `no_audio_playing`.
+    pub verdict: String,
+    /// Plain language, written for the person who has to fix it.
+    pub diagnosis: String,
+    #[serde(default)]
+    pub permission_preflight: bool,
+    #[serde(default)]
+    pub audio_was_playing: bool,
+    /// Share of the time the tap returned audio while something was playing, or a
+    /// negative number when nothing played and the run proves nothing either way.
+    #[serde(default)]
+    pub coverage: f64,
+    #[serde(default)]
+    pub sample_rate: f64,
+    #[serde(default)]
+    pub frames: u64,
+    #[serde(default)]
+    pub nonzero_samples: u64,
+}
+
+impl ProbeReport {
+    /// Whether this probe is evidence the tap works. `no_audio_playing` is deliberately
+    /// not a pass: it is the absence of evidence, and treating it as a pass would tell
+    /// somebody their capture was fine on the strength of a test that tested nothing.
+    pub fn is_healthy(&self) -> bool {
+        self.verdict == "capturing"
+    }
+
+    /// Whether the probe actually got to test anything.
+    pub fn was_conclusive(&self) -> bool {
+        self.verdict != "no_audio_playing"
+    }
+}
+
+/// Runs a real tap for a few seconds and reports whether it captures anything.
+///
+/// The check to run before trusting a recording, and the first to run when one comes
+/// back silent. Writes no PCM and no file — it opens a tap, measures, and reports.
+pub fn probe_capture(target: TapTarget, seconds: f64) -> Result<ProbeReport> {
+    let mut args = vec!["--probe".to_string()];
+    args.extend(target.to_args());
+    args.push("--duration".to_string());
+    args.push(seconds.max(1.0).to_string());
+
+    let output = Command::new(helper_path()?).args(&args).output()?;
+
+    // Every verdict but `capturing` exits non-zero, and each one carries a report worth
+    // reading. A non-zero exit is the finding here, not a failure to produce one, so the
+    // report is parsed first and the status consulted only when there is nothing to
+    // parse.
+    serde_json::from_slice(&output.stdout).map_err(|_| AudioError::HelperFailed {
+        status: output.status.code().unwrap_or(-1),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
 /// Whether macOS currently permits capturing system audio. Does not prompt.
 pub fn permission_granted() -> Result<bool> {
     let output = Command::new(helper_path()?)
@@ -717,6 +777,39 @@ mod tests {
             }
             other => panic!("expected a stopped event, got {other:?}"),
         }
+    }
+
+    /// The absence of evidence is not evidence. A probe where nothing played tested
+    /// nothing, and calling it healthy would vouch for a tap on the strength of a run
+    /// that never exercised it.
+    #[test]
+    fn a_probe_that_heard_nothing_playing_is_not_a_pass() {
+        let report: ProbeReport = serde_json::from_str(
+            r#"{"verdict":"no_audio_playing","diagnosis":"nothing played","coverage":-1}"#,
+        )
+        .expect("probe reports parse");
+        assert!(!report.is_healthy());
+        assert!(!report.was_conclusive());
+    }
+
+    /// A tap that caught one chime and nothing else must not read as a working tap.
+    #[test]
+    fn an_intermittent_tap_is_not_healthy() {
+        let report: ProbeReport = serde_json::from_str(
+            r#"{"verdict":"intermittent","diagnosis":"12% of the time","coverage":0.12}"#,
+        )
+        .expect("probe reports parse");
+        assert!(!report.is_healthy());
+        assert!(report.was_conclusive());
+    }
+
+    #[test]
+    fn a_capturing_probe_is_healthy() {
+        let report: ProbeReport = serde_json::from_str(
+            r#"{"verdict":"capturing","diagnosis":"real audio","coverage":1.0}"#,
+        )
+        .expect("probe reports parse");
+        assert!(report.is_healthy());
     }
 
     #[test]
