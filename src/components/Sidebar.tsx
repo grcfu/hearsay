@@ -191,26 +191,30 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   // trains people to ignore the certainty, and reporting a certainty as a guess wastes
   // the one chance to save the meeting.
 
-  // Certain. The device has stopped handing over buffers at all — not quiet, stopped.
-  // Nothing said from here on is reaching the file.
-  const stalledSource =
-    recording && (live?.system_stalled_seconds ?? 0) > 5
-      ? "system"
-      : recording && (live?.mic_stalled_seconds ?? 0) > 5
-        ? "mic"
-        : null;
+  // Certain, for the microphone only. An open input device delivers buffers at a fixed
+  // rate whatever the room is doing, so a count that has stopped moving means the device
+  // stopped — not that nobody is talking.
+  //
+  // The same reasoning does not transfer to the tap, and must not be applied to it. A
+  // process tap is driven by the tapped app's output: while that app is quiet it
+  // delivers no buffers at all rather than buffers of zeros, so a stalled tap is the
+  // ordinary state of any pause in a meeting. Alarming on it would fire every time
+  // nobody spoke, which is the exact habit that teaches people to ignore the alarm.
+  const micStalled = recording && (live?.mic_stalled_seconds ?? 0) > 5;
 
-  // Near certain, and the helper's own verdict: a target is provably playing audio and
-  // the tap is returning zeros. This is the failure that cost a whole interview, and
-  // until now it reached the UI and was never rendered.
+  // The tap's verdict has to come from the helper, the only party that checks whether
+  // the target was provably playing while the tap returned zeros. This is the failure
+  // that cost a whole interview, and until now it reached the UI and was never rendered.
   const tapSilentWhilePlaying = recording && (live?.silent_while_audio_playing ?? false);
+
+  const stalledSource = micStalled ? "mic" : tapSilentWhilePlaying ? "system" : null;
 
   // A guess. A minute with nothing audible looks exactly like an empty room, so this
   // stays dismissible and never stops the recording on its own.
   const silentTooLong =
     recording && !dismissedSilence && (live?.system_silent_seconds ?? 0) > 60;
 
-  const hardFault = stalledSource !== null || tapSilentWhilePlaying;
+  const hardFault = stalledSource !== null;
 
   // The window is usually behind the meeting app, so an in-window banner would go
   // unseen. Ask the system to surface it.

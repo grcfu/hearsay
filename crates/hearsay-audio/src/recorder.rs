@@ -112,11 +112,19 @@ pub struct RecordingStatus {
     pub mic_silent_seconds: f64,
     /// Seconds the system tap has gone without handing over a buffer *at all*.
     ///
-    /// The stronger claim, and the one worth interrupting somebody for. Silence can be
-    /// an empty room; a device that has stopped delivering is broken, and nothing said
-    /// from here on is being recorded.
+    /// **Not on its own evidence of a fault.** A process tap is driven by the tapped
+    /// app's output: when that app plays nothing it delivers no buffers rather than
+    /// buffers of zeros, so this climbs during any quiet stretch of a meeting. Only the
+    /// helper can tell the two apart, because only it checks whether the target was
+    /// provably playing — read `silent_while_audio_playing` for the corroborated claim
+    /// and treat this as supporting detail.
     pub system_stalled_seconds: f64,
-    /// The same for the microphone. Zero whenever no microphone is open.
+    /// Seconds the microphone has gone without handing over a buffer. Zero whenever no
+    /// microphone is open.
+    ///
+    /// Unlike the tap, this *is* evidence on its own. An open input device delivers
+    /// buffers at a fixed rate whatever the room is doing, so a count that stops moving
+    /// means the device stopped — not that nobody is talking.
     pub mic_stalled_seconds: f64,
     /// The helper reported capturing zeros while audio was provably playing.
     pub silent_while_audio_playing: bool,
@@ -1104,9 +1112,12 @@ fn spawn_writer(
                 let tick = WRITE_INTERVAL.as_secs_f64();
                 let mic_buffers = shared.mic_buffers.load(Ordering::Relaxed);
                 let system_buffers = shared.system_buffers.load(Ordering::Relaxed);
-                // A device that has stopped handing over buffers at all is broken. One
-                // still handing over buffers that happen to be quiet is a quiet room,
-                // and saying otherwise would report a failure every time nobody spoke.
+                // For the microphone this is conclusive: an open input device delivers
+                // buffers at a fixed rate whatever the room is doing. For the tap it is
+                // not, because a process tap delivers nothing at all while the app it
+                // follows is quiet — which is why the corroborated verdict has to come
+                // from the helper, the only party that checks whether the target was
+                // actually playing.
                 let system_stalled = system_buffers == last_system_buffers;
                 let mic_stalled = stereo && mic_buffers == last_mic_buffers;
                 last_system_buffers = system_buffers;
