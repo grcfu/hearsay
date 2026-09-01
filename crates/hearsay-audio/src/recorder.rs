@@ -96,6 +96,20 @@ pub struct RecordingStatus {
     /// session has never been in conversation mode, because until then there is no
     /// microphone.
     pub has_mic_audio: bool,
+    /// Seconds since the system tap last delivered a non-zero sample, reset every time
+    /// one arrives.
+    ///
+    /// [`Self::has_audio`] cannot answer the question the meter is actually asked. It
+    /// says whether the tap *ever* worked, so one notification chime in the first
+    /// seconds of a meeting leaves it true for the rest of the recording — and a tap
+    /// that dies at minute three then reads exactly like one that is working. This is
+    /// the reading that stays true to what is happening now.
+    pub system_silent_seconds: f64,
+    /// The same for the microphone, and zero whenever no microphone is open.
+    ///
+    /// Kept apart from the system figure because they fail for unrelated reasons and
+    /// a combined one would hide whichever channel was still working.
+    pub mic_silent_seconds: f64,
     /// The helper reported capturing zeros while audio was provably playing.
     pub silent_while_audio_playing: bool,
     /// The system tap could not be restarted after a mode switch, so the recording is
@@ -935,6 +949,8 @@ fn spawn_writer(
             let mut warned_about_drops = false;
             let mut mic_meter = 0.0f32;
             let mut system_meter = 0.0f32;
+            let mut system_silent_seconds = 0.0f64;
+            let mut mic_silent_seconds = 0.0f64;
 
             loop {
                 let stopping = shared.stop.load(Ordering::Relaxed);
@@ -1034,6 +1050,28 @@ fn spawn_writer(
                 mic_meter = meter_level(mic_meter, mic_arrival);
                 system_meter = meter_level(system_meter, system_arrival);
 
+                // Measured from what arrived this tick, not from the smoothed meter: the
+                // meter falls gradually by design, and a decaying tail would keep
+                // resetting the count and hide a tap that had already stopped.
+                let tick = WRITE_INTERVAL.as_secs_f64();
+                if system_arrival > 0.0 {
+                    system_silent_seconds = 0.0;
+                } else {
+                    system_silent_seconds += tick;
+                }
+                // Only counted while a microphone is actually open. In listen-only there
+                // is nothing to be silent, and counting anyway would report a fault
+                // against a mode whose whole promise is that the mic is closed.
+                if stereo {
+                    if mic_arrival > 0.0 {
+                        mic_silent_seconds = 0.0;
+                    } else {
+                        mic_silent_seconds += tick;
+                    }
+                } else {
+                    mic_silent_seconds = 0.0;
+                }
+
                 if let Ok(mut status) = shared.status.lock() {
                     status.elapsed_ms = elapsed.as_millis() as u64;
                     status.peak = mic_meter.max(system_meter);
@@ -1041,6 +1079,8 @@ fn spawn_writer(
                     status.system_peak = system_meter;
                     status.dropped_ms = dropped_ms;
                     status.losing_audio = losing_audio;
+                    status.system_silent_seconds = system_silent_seconds;
+                    status.mic_silent_seconds = mic_silent_seconds;
                 }
 
                 // A switch to conversation asks for the check to come round again soon:
