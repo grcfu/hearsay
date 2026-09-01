@@ -248,6 +248,14 @@ func capture(_ options: Options) throws {
     var nextReport = started.addingTimeInterval(1)
     var lastSilenceWarning: Date?
     var stopReason = "duration"
+    /// How long the tap has been handing back nothing but zeros, reset the moment a
+    /// real sample arrives. This, not the cumulative total, is what the guard reads.
+    var silentSeconds = 0.0
+    /// Of that, how much was while a target was provably playing — the damning kind.
+    var silentWhilePlayingSeconds = 0.0
+    var everProducedAudio = false
+    var lastReport = started
+    var lastSilenceTally = started
 
     while true {
         if signals.shouldStop {
@@ -273,26 +281,48 @@ func capture(_ options: Options) throws {
                     "nonzero_samples": stats.nonZeroSamples,
                 ])
 
-            // The guard that gives this project its name-brand failure a voice.
+            // The guard that gives this project's name-brand failure a voice.
+            //
+            // Read over the last window, never over the run. A tap that dies mid-meeting
+            // is the same failure as one that never started, and a cumulative count
+            // cannot see it: the first notification chime of the day would leave the
+            // total above zero and silence this guard for every minute that followed.
             let elapsed = now.timeIntervalSince(started)
-            if stats.nonZeroSamples == 0, elapsed >= silenceGraceSeconds,
-                anyTargetProducingOutput(target)
-            {
+            if stats.intervalNonZeroSamples == 0 {
+                silentSeconds += now.timeIntervalSince(lastReport)
+            } else {
+                silentSeconds = 0
+                everProducedAudio = true
+            }
+            lastReport = now
+
+            if silentSeconds >= silenceGraceSeconds, anyTargetProducingOutput(target) {
+                silentWhilePlayingSeconds += now.timeIntervalSince(lastSilenceTally)
                 let due =
                     lastSilenceWarning.map { now.timeIntervalSince($0) >= silenceRepeatSeconds }
                     ?? true
                 if due {
                     lastSilenceWarning = now
+                    // "Stopped producing" and "never produced" are different problems
+                    // with different causes, so they are not reported as one.
+                    let message =
+                        everProducedAudio
+                        ? "the tap has produced only zeros for \(Int(silentSeconds))s while "
+                            + "audio is playing — it captured audio earlier, so it has "
+                            + "stopped; the rest of this recording will be silent"
+                        : "the tap has produced only zeros while audio is playing — "
+                            + "this recording will be silent"
                     emit(
                         "silence",
                         [
                             "elapsed_seconds": elapsed,
-                            "message":
-                                "the tap has produced only zeros while audio is playing — "
-                                + "this recording will be silent",
+                            "silent_seconds": silentSeconds,
+                            "captured_audio_earlier": everProducedAudio,
+                            "message": message,
                         ])
                 }
             }
+            lastSilenceTally = now
         }
 
         Thread.sleep(forTimeInterval: 0.05)
@@ -307,6 +337,11 @@ func capture(_ options: Options) throws {
             "frames": stats.frames,
             "nonzero_samples": stats.nonZeroSamples,
             "peak": Double(stats.peak),
+            // Reported at the end as well as live, so a recording can be judged after
+            // the fact even when nobody was watching the meter. A run that ends with a
+            // large figure here captured a meeting that is not in the file.
+            "silent_while_playing_seconds": silentWhilePlayingSeconds,
+            "ended_silent": silentSeconds >= silenceGraceSeconds,
         ])
 
     // Flush before exiting so the reader sees every last sample.

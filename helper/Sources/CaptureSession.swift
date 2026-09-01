@@ -4,10 +4,19 @@ import Foundation
 
 /// What the tap has produced so far. `nonZeroSamples` is the number that matters: a tap
 /// without permission produces frames at exactly the right rate, all of them zero.
+///
+/// `intervalNonZeroSamples` is the same count over the last reporting window only, and
+/// it is the one the silence guard reads. The cumulative total cannot answer "is the tap
+/// producing audio *now*": it only ever grows, so a single notification chime in the
+/// first seconds of a meeting leaves it above zero for the rest of the recording and
+/// permanently disarms the guard. A tap that dies twenty minutes in then runs to the end
+/// reporting success, which is exactly the failure §3 exists to make impossible.
 struct LevelStats {
     var frames: UInt64 = 0
     var samples: UInt64 = 0
     var nonZeroSamples: UInt64 = 0
+    /// Non-zero samples seen since the last `snapshot(resetInterval: true)`.
+    var intervalNonZeroSamples: UInt64 = 0
     var peak: Float = 0
     var intervalPeak: Float = 0
     var sumSquares: Double = 0
@@ -243,19 +252,24 @@ final class CaptureSession {
         stats.frames += UInt64(count / max(channels, 1))
         stats.samples += UInt64(count)
         stats.nonZeroSamples += nonZero
+        stats.intervalNonZeroSamples += nonZero
         stats.sumSquares += sumSquares
         if peak > stats.peak { stats.peak = peak }
         if peak > stats.intervalPeak { stats.intervalPeak = peak }
         lock.unlock()
     }
 
-    /// Cumulative stats. Passing `resetInterval` clears the short-window peak so the
-    /// caller can emit a live level meter.
+    /// Cumulative stats. Passing `resetInterval` clears the short-window peak and the
+    /// short-window non-zero count, so the caller can emit a live level meter and decide
+    /// whether the tap is producing audio *now* rather than whether it ever did.
     func snapshot(resetInterval: Bool = false) -> LevelStats {
         lock.lock()
         defer { lock.unlock() }
         let current = stats
-        if resetInterval { stats.intervalPeak = 0 }
+        if resetInterval {
+            stats.intervalPeak = 0
+            stats.intervalNonZeroSamples = 0
+        }
         return current
     }
 
