@@ -26,6 +26,10 @@ interface LiveStatus {
   system_peak: number;
   has_audio: boolean;
   silent_while_audio_playing: boolean;
+  system_silent_seconds: number;
+  mic_silent_seconds: number;
+  system_stalled_seconds: number;
+  mic_stalled_seconds: number;
   muted: boolean;
   system_audio_lost: boolean;
   echo: { lag_ms: number; correlation: number } | null;
@@ -178,31 +182,57 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     else setDismissedSilence(false);
   }, [recording]);
 
-  // A minute of recording with no audio at all. Not proof — a genuinely quiet room looks
-  // the same — but worth interrupting for, because the alternative is discovering it
-  // after the meeting. Dismissible, and never stops the recording on its own.
+  // Three different claims, in descending order of how sure Hearsay can be. They are
+  // kept apart because they call for different words: reporting a guess as a certainty
+  // trains people to ignore the certainty, and reporting a certainty as a guess wastes
+  // the one chance to save the meeting.
+
+  // Certain. The device has stopped handing over buffers at all — not quiet, stopped.
+  // Nothing said from here on is reaching the file.
+  const stalledSource =
+    recording && (live?.system_stalled_seconds ?? 0) > 5
+      ? "system"
+      : recording && (live?.mic_stalled_seconds ?? 0) > 5
+        ? "mic"
+        : null;
+
+  // Near certain, and the helper's own verdict: a target is provably playing audio and
+  // the tap is returning zeros. This is the failure that cost a whole interview, and
+  // until now it reached the UI and was never rendered.
+  const tapSilentWhilePlaying = recording && (live?.silent_while_audio_playing ?? false);
+
+  // A guess. A minute with nothing audible looks exactly like an empty room, so this
+  // stays dismissible and never stops the recording on its own.
   const silentTooLong =
-    recording && !dismissedSilence && (live?.elapsed_ms ?? 0) > 60_000 && !live?.has_audio;
+    recording && !dismissedSilence && (live?.system_silent_seconds ?? 0) > 60;
+
+  const hardFault = stalledSource !== null || tapSilentWhilePlaying;
 
   // The window is usually behind the meeting app, so an in-window banner would go
   // unseen. Ask the system to surface it.
   useEffect(() => {
-    if (!silentTooLong) return;
+    if (!silentTooLong && !hardFault) return;
+    const [title, body] = hardFault
+      ? [
+          "Hearsay has stopped capturing",
+          stalledSource === "mic"
+            ? "Your microphone has stopped sending audio. Nothing you say is being recorded."
+            : "The audio tap has stopped returning sound while the meeting is still playing. Nothing is being recorded.",
+        ]
+      : [
+          "Hearsay has not heard anything",
+          "A minute into this recording, no audio has been captured. Open Hearsay to stop it, or ignore this if the room is just quiet.",
+        ];
     void (async () => {
       try {
         let allowed = await isPermissionGranted();
         if (!allowed) allowed = (await requestPermission()) === "granted";
-        if (allowed) {
-          sendNotification({
-            title: "Hearsay has not heard anything",
-            body: "A minute into this recording, no audio has been captured. Open Hearsay to stop it, or ignore this if the room is just quiet.",
-          });
-        }
+        if (allowed) sendNotification({ title, body });
       } catch {
         // No notification permission is survivable — the in-window alert still shows.
       }
     })();
-  }, [silentTooLong]);
+  }, [silentTooLong, hardFault, stalledSource]);
 
   // The scrub hotkey works while Hearsay is in the background, so confirmation has to
   // arrive by event. Silently erasing audio with no acknowledgement would leave the user
@@ -382,7 +412,24 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     );
   }
 
-  if (recording && silentTooLong) {
+  // The certain fault comes first and is not dismissible: unlike a quiet room, there is
+  // nothing here that turns out to be fine if you wait.
+  if (recording && hardFault) {
+    notices.push(
+      <div className="bar-alert" key="stalled">
+        <span>
+          {stalledSource === "mic"
+            ? "Your microphone has stopped. Nothing you say is being recorded."
+            : "Audio capture has stopped. The meeting is playing but nothing is reaching the file."}
+        </span>
+        <button type="button" className="button small" onClick={stop}>
+          End recording
+        </button>
+      </div>,
+    );
+  }
+
+  if (recording && silentTooLong && !hardFault) {
     notices.push(
       <div className="bar-alert" key="silent">
         <span>Nothing heard for a minute.</span>
@@ -452,7 +499,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
     );
   }
 
-  if (recording && live && !live.has_audio) {
+  if (recording && live && !live.has_audio && !hardFault) {
     notices.push(
       <p className="bar-note" key="no-audio">
         No audio captured yet. If this stays empty, the recording will be silent.
