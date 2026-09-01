@@ -279,6 +279,9 @@ func capture(_ options: Options) throws {
                     "rms": stats.rms,
                     "frames": stats.frames,
                     "nonzero_samples": stats.nonZeroSamples,
+                    // The windowed count, so the reader can tell whether the tap is
+                    // producing audio now rather than whether it ever did.
+                    "interval_nonzero_samples": stats.intervalNonZeroSamples,
                 ])
 
             // The guard that gives this project's name-brand failure a voice.

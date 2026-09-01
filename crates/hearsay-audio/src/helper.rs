@@ -59,10 +59,36 @@ impl TapTarget {
 pub enum HelperEvent {
     Format { sample_rate: u32, channels: u16 },
     Started,
-    Level { peak: f32, rms: f64, frames: u64 },
+    Level {
+        peak: f32,
+        rms: f64,
+        frames: u64,
+        /// Non-zero samples in the last window. Zero means the tap is handing back
+        /// silence *now*, which the cumulative total can never say.
+        interval_nonzero_samples: u64,
+    },
     /// The tap is producing zeros while audio is provably playing.
-    Silence { elapsed_seconds: f64, message: String },
-    Stopped { reason: String, frames: u64, nonzero_samples: u64 },
+    Silence {
+        elapsed_seconds: f64,
+        /// How long the tap has been handing back nothing but zeros, right now. Reset
+        /// when a real sample arrives, so this is the length of the current outage
+        /// rather than a total for the run.
+        silent_seconds: f64,
+        /// Whether the tap ever worked. A tap that captured audio and then stopped is a
+        /// different fault from one that never started, and pointing someone at the
+        /// permission settings for the first wastes their time.
+        captured_audio_earlier: bool,
+        message: String,
+    },
+    Stopped {
+        reason: String,
+        frames: u64,
+        nonzero_samples: u64,
+        /// Seconds spent silent while a target was provably playing.
+        silent_while_playing_seconds: f64,
+        /// Whether the run was still silent when it ended.
+        ended_silent: bool,
+    },
     Error { kind: String, message: String },
     /// Permission looks missing, but capture is proceeding anyway. Advisory: the
     /// silence check is what actually decides whether a recording is real.
@@ -77,7 +103,18 @@ pub struct HelperStatus {
     pub peak: f32,
     pub rms: f64,
     pub frames: u64,
+    /// The tap is silent while audio is playing *right now*. Cleared when real samples
+    /// come back, so a tap that recovers stops shouting — a warning that cannot go away
+    /// is one people learn to ignore, and this one has to still mean something the next
+    /// time it appears.
     pub silent_while_audio_playing: bool,
+    /// How long the current outage has been running.
+    pub silent_seconds: f64,
+    /// Whether the tap was ever working. Separates "stopped" from "never started".
+    pub captured_audio_earlier: bool,
+    /// Sticky: the worst outage this run has seen, so a recording can be judged at the
+    /// end even if the tap recovered before anyone looked.
+    pub longest_silence_seconds: f64,
 }
 
 /// Locates the helper binary.
@@ -399,20 +436,42 @@ fn spawn_stderr_reader(
                             let _ = sender.send(event.clone());
                         }
                     }
-                    HelperEvent::Level { peak, rms, frames } => {
+                    HelperEvent::Level {
+                        peak,
+                        rms,
+                        frames,
+                        interval_nonzero_samples,
+                    } => {
                         if let Ok(mut status) = status.lock() {
                             status.peak = *peak;
                             status.rms = *rms;
                             status.frames = *frames;
+                            // Real audio in the last window clears the alarm. The
+                            // longest-outage tally stays, so the recording can still be
+                            // judged afterwards.
+                            if *interval_nonzero_samples > 0 {
+                                status.silent_while_audio_playing = false;
+                                status.silent_seconds = 0.0;
+                                status.captured_audio_earlier = true;
+                            }
                         }
                     }
                     HelperEvent::PermissionWarning { message } => {
                         tracing::warn!("{message}");
                     }
-                    HelperEvent::Silence { message, .. } => {
+                    HelperEvent::Silence {
+                        message,
+                        silent_seconds,
+                        captured_audio_earlier,
+                        ..
+                    } => {
                         tracing::error!("audio helper reports silence: {message}");
                         if let Ok(mut status) = status.lock() {
                             status.silent_while_audio_playing = true;
+                            status.silent_seconds = *silent_seconds;
+                            status.captured_audio_earlier = *captured_audio_earlier;
+                            status.longest_silence_seconds =
+                                status.longest_silence_seconds.max(*silent_seconds);
                         }
                     }
                     _ => {}
@@ -449,6 +508,12 @@ fn parse_event(line: &str) -> HelperEvent {
             .unwrap_or_default()
             .to_string()
     };
+    let flag = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
 
     match kind {
         "format" => HelperEvent::Format {
@@ -460,15 +525,20 @@ fn parse_event(line: &str) -> HelperEvent {
             peak: number("peak").unwrap_or(0.0) as f32,
             rms: number("rms").unwrap_or(0.0),
             frames: number("frames").unwrap_or(0.0) as u64,
+            interval_nonzero_samples: number("interval_nonzero_samples").unwrap_or(0.0) as u64,
         },
         "silence" => HelperEvent::Silence {
             elapsed_seconds: number("elapsed_seconds").unwrap_or(0.0),
+            silent_seconds: number("silent_seconds").unwrap_or(0.0),
+            captured_audio_earlier: flag("captured_audio_earlier"),
             message: text("message"),
         },
         "stopped" => HelperEvent::Stopped {
             reason: text("reason"),
             frames: number("frames").unwrap_or(0.0) as u64,
             nonzero_samples: number("nonzero_samples").unwrap_or(0.0) as u64,
+            silent_while_playing_seconds: number("silent_while_playing_seconds").unwrap_or(0.0),
+            ended_silent: flag("ended_silent"),
         },
         "error" => HelperEvent::Error {
             kind: text("kind"),
@@ -552,6 +622,82 @@ fn spawn_stdout_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this guard was rebuilt for: a level report carries the *windowed*
+    /// count, so a tap that has gone quiet is visible even after it produced audio
+    /// earlier in the run.
+    #[test]
+    fn a_level_report_carries_the_windowed_nonzero_count() {
+        let event = parse_event(
+            r#"{"type":"level","peak":0.0,"rms":0.0,"frames":48000,
+                "nonzero_samples":144000,"interval_nonzero_samples":0}"#,
+        );
+        match event {
+            HelperEvent::Level {
+                interval_nonzero_samples,
+                ..
+            } => assert_eq!(interval_nonzero_samples, 0),
+            other => panic!("expected a level event, got {other:?}"),
+        }
+    }
+
+    /// A tap that worked and then stopped must not be reported as one that never
+    /// started: they send the reader to different places to fix it.
+    #[test]
+    fn a_silence_report_says_whether_the_tap_ever_worked() {
+        let event = parse_event(
+            r#"{"type":"silence","elapsed_seconds":600.0,"silent_seconds":57.0,
+                "captured_audio_earlier":true,"message":"stopped"}"#,
+        );
+        match event {
+            HelperEvent::Silence {
+                silent_seconds,
+                captured_audio_earlier,
+                ..
+            } => {
+                assert_eq!(silent_seconds, 57.0);
+                assert!(captured_audio_earlier);
+            }
+            other => panic!("expected a silence event, got {other:?}"),
+        }
+    }
+
+    /// An older helper emits neither field. Recording must survive the mismatch rather
+    /// than refusing to parse the line at all.
+    #[test]
+    fn a_helper_without_the_new_fields_still_parses() {
+        let event = parse_event(r#"{"type":"silence","elapsed_seconds":5.0,"message":"only zeros"}"#);
+        match event {
+            HelperEvent::Silence {
+                silent_seconds,
+                captured_audio_earlier,
+                ..
+            } => {
+                assert_eq!(silent_seconds, 0.0);
+                assert!(!captured_audio_earlier);
+            }
+            other => panic!("expected a silence event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stopped_report_carries_the_silence_tally() {
+        let event = parse_event(
+            r#"{"type":"stopped","reason":"signal","frames":1,"nonzero_samples":2,
+                "silent_while_playing_seconds":941.0,"ended_silent":true}"#,
+        );
+        match event {
+            HelperEvent::Stopped {
+                silent_while_playing_seconds,
+                ended_silent,
+                ..
+            } => {
+                assert_eq!(silent_while_playing_seconds, 941.0);
+                assert!(ended_silent);
+            }
+            other => panic!("expected a stopped event, got {other:?}"),
+        }
+    }
 
     #[test]
     fn process_targets_become_repeated_pid_flags() {
