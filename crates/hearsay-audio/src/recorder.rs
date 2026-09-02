@@ -487,6 +487,13 @@ impl Recording {
             system.retire();
         }
 
+        // `MicSource::start` waits for the device to deliver a buffer before it returns.
+        // A working microphone answers in about 200 ms, so §4's sub-second gap stands.
+        // A broken one costs the length of that wait before the tap goes back, which is
+        // the one case where the gap is longer than promised — and the right trade: the
+        // gap is padded as true silence and written down as a span, where the failure it
+        // catches used to cost the whole meeting's microphone channel with no marker at
+        // all.
         let mic = match MicSource::start() {
             Ok(mic) => mic,
             Err(error) => {
