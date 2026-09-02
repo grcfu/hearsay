@@ -359,7 +359,13 @@ func capture(_ options: Options) throws {
                     .map({ now.timeIntervalSince($0) >= silenceRepeatSeconds }) ?? true
                 {
                     lastWrongSourceWarning = now
-                    let names = others.compactMap { $0.name }.prefix(3)
+                    // Name, then bundle id, then the bare pid — the same fallback the
+                    // picker uses. Filtering to processes that happen to carry a name
+                    // dropped every one of them for a short-lived player like `afplay`,
+                    // leaving the warning to read "while  is playing audio".
+                    let names = others.map {
+                        $0.name ?? $0.bundleID ?? "pid \($0.pid)"
+                    }.prefix(3)
                     emit(
                         "wrong_source",
                         [
