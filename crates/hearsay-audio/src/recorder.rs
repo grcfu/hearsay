@@ -1268,6 +1268,41 @@ fn spawn_writer(
 }
 
 #[cfg(test)]
+mod status_contract {
+    use super::RecordingStatus;
+
+    /// The UI reads these by name off the serialized status, and TypeScript cannot check
+    /// that they exist — a renamed field compiles cleanly on both sides and silently
+    /// leaves a warning banner permanently switched off, which is exactly the class of
+    /// fault this whole area is meant to prevent.
+    #[test]
+    fn the_fields_the_warning_banners_read_are_all_serialized() {
+        let json = serde_json::to_value(RecordingStatus::default())
+            .expect("the live status has to serialize");
+        let object = json.as_object().expect("status serializes as an object");
+
+        for field in [
+            "has_audio",
+            "silent_while_audio_playing",
+            "others_playing",
+            "system_silent_seconds",
+            "mic_silent_seconds",
+            "system_stalled_seconds",
+            "mic_stalled_seconds",
+            "mic_peak",
+            "system_peak",
+            "losing_audio",
+            "dropped_ms",
+        ] {
+            assert!(
+                object.contains_key(field),
+                "`{field}` is read by the UI but is not in the serialized status"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod silence_accounting {
     use super::count_silent_frames;
 
