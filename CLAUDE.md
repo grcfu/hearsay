@@ -339,7 +339,15 @@ identical and the causes are not. A muted span is a microphone that was open and
 deliberately silenced; `no_microphone` is one that was never open, so nothing said in the
 room *could* have reached disk. Reading the second as the first has the transcript claim
 the user chose to go quiet when in fact they were not being recorded — an assertion about
-somebody's behaviour, made from a gap. Written only when the mode changed (§4).
+somebody's behaviour, made from a gap.
+
+Written when the recording's channels were not what its mode says throughout — either
+because the mode changed (§4), or because **a microphone stopped delivering while nobody
+asked it to**: an interface unplugged mid-meeting, AirPods walking out of range. The
+second leaves the mode alone, so `events.mode` still says `conversation` and the file is
+still stereo, and without the span the silent left channel reads as the recorder sitting
+quietly through their own meeting. A recording that stayed in one mode with both devices
+behaving gets none.
 
 ### Interrupted recordings
 

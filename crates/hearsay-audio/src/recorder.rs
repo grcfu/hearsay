@@ -77,9 +77,18 @@ const DROPPED_AUDIO_ALARM_MS: u64 = 1_000;
 /// exists to prevent.
 ///
 /// This is only the point at which the *file* stops waiting, which is harmless and
-/// reversible. Deciding the microphone is gone, and saying so, is a stronger claim that
-/// waits longer.
+/// reversible. Deciding the microphone is gone, and saying so, is a stronger claim and
+/// waits longer — see [`MIC_LOST_AFTER`].
 const MIC_STALL_GRACE: f64 = 0.6;
+
+/// How long a microphone must deliver nothing before the recording says it is gone.
+///
+/// Longer than [`MIC_STALL_GRACE`] because it answers a different question. Releasing the
+/// file is cheap, reversible and needs only a suspicion; telling the user their microphone
+/// has failed, and writing a `no_microphone` span into the transcript, is an assertion
+/// about what the recording could hear and it should not be made about a hiccup. Three
+/// seconds is a device that is not coming back on its own.
+const MIC_LOST_AFTER: f64 = 3.0;
 
 /// What the UI reads while a recording is running.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -142,6 +151,22 @@ pub struct RecordingStatus {
     /// buffers at a fixed rate whatever the room is doing, so a count that stops moving
     /// means the device stopped — not that nobody is talking.
     pub mic_stalled_seconds: f64,
+    /// The microphone stopped delivering audio while nobody asked it to.
+    ///
+    /// An input device that went away mid-recording: an interface unplugged, AirPods
+    /// disconnected, a USB microphone knocked out of its port. The verdict, where
+    /// [`Self::mic_stalled_seconds`] is the evidence — a stall of a few hundred
+    /// milliseconds is a hiccup and is not worth a word to anybody, and only past
+    /// [`MIC_LOST_AFTER`] is this set.
+    ///
+    /// **Clears if the device starts delivering again.** A warning that cannot go away is
+    /// one people learn to ignore, and the stretch that was missed is written down as a
+    /// `no_microphone` span either way, so nothing is lost by letting the live alarm
+    /// clear.
+    ///
+    /// False whenever no microphone is open, including after a deliberate switch down:
+    /// that is the user's own press, not a fault.
+    pub microphone_lost: bool,
     /// The helper reported capturing zeros while audio was provably playing.
     pub silent_while_audio_playing: bool,
     /// Apps playing audio that the tap is not following.
@@ -273,8 +298,43 @@ struct Shared {
     /// failed every time they stopped talking.
     mic_buffers: AtomicU64,
     system_buffers: AtomicU64,
+    /// Whether the microphone has ever stopped delivering mid-recording.
+    ///
+    /// Sticky, unlike [`RecordingStatus::microphone_lost`], which clears when the device
+    /// comes back. It decides whether the stretches without a microphone are worth
+    /// writing down at all, and a recording whose microphone died and recovered still has
+    /// a stretch the reader cannot account for from the audio.
+    microphone_ever_lost: AtomicBool,
     /// The most recently committed stereo audio, kept for echo analysis.
     analysis: Mutex<Vec<f32>>,
+}
+
+impl Shared {
+    /// Opens a stretch without a microphone, if one is not already open.
+    ///
+    /// Idempotent on purpose. A microphone that dies and is then deliberately switched
+    /// off would otherwise open the stretch twice, and the second would move its start
+    /// forward to the press — leaving the seconds the device was already dead unmarked,
+    /// which is precisely the reading `CLAUDE.md` §8 forbids: a gap with no cause looks
+    /// like a choice.
+    fn open_no_microphone_span(&self, at_ms: i64) -> Result<()> {
+        let mut open = self.mic_closed_since.lock().map_err(|_| poisoned())?;
+        if open.is_none() {
+            *open = Some(at_ms);
+        }
+        Ok(())
+    }
+
+    /// Ends the open stretch without a microphone, now that there is one.
+    fn close_no_microphone_span(&self, at_ms: i64) -> Result<()> {
+        if let Some(start) = self.mic_closed_since.lock().map_err(|_| poisoned())?.take() {
+            self.no_microphone_spans
+                .lock()
+                .map_err(|_| poisoned())?
+                .push((start, at_ms));
+        }
+        Ok(())
+    }
 }
 
 /// One reader thread and the flag that retires it.
@@ -383,6 +443,7 @@ impl Recording {
             scrubbed_samples: AtomicU64::new(0),
             mic_buffers: AtomicU64::new(0),
             system_buffers: AtomicU64::new(0),
+            microphone_ever_lost: AtomicBool::new(false),
             analysis: Mutex::new(Vec::new()),
         });
 
@@ -578,6 +639,9 @@ impl Recording {
 
         if let Ok(mut status) = self.shared.status.lock() {
             status.system_audio_lost = lost_system_audio;
+            // `MicSource::start` does not return until the device has handed over a
+            // buffer, so a microphone is provably delivering here.
+            status.microphone_lost = false;
         }
 
         tracing::info!(
@@ -623,7 +687,10 @@ impl Recording {
             .map_err(|_| poisoned())?
             .set_mic_present(false);
 
-        *self.shared.mic_closed_since.lock().map_err(|_| poisoned())? = Some(at_ms);
+        // Opened rather than set, so a microphone that had already died keeps the start
+        // it was given. The stretch began when the device stopped, not when the user
+        // pressed the button that agreed with it.
+        self.shared.open_no_microphone_span(at_ms)?;
         *self.mode.lock().map_err(|_| poisoned())? = Mode::ListenOnly;
         self.switched.store(true, Ordering::Relaxed);
 
@@ -631,6 +698,9 @@ impl Recording {
             status.muted = false;
             // Nothing left for the other party's voice to bleed into.
             status.echo = None;
+            // No microphone is open, which is now what the user asked for. A fault
+            // reported against somebody's own press is noise.
+            status.microphone_lost = false;
         }
 
         tracing::info!(
@@ -719,20 +789,7 @@ impl Recording {
 
     /// Ends the open stretch without a microphone, now that there is one.
     fn close_no_microphone_span(&self, at_ms: i64) -> Result<()> {
-        if let Some(start) = self
-            .shared
-            .mic_closed_since
-            .lock()
-            .map_err(|_| poisoned())?
-            .take()
-        {
-            self.shared
-                .no_microphone_spans
-                .lock()
-                .map_err(|_| poisoned())?
-                .push((start, at_ms));
-        }
-        Ok(())
+        self.shared.close_no_microphone_span(at_ms)
     }
 
     // ---- mute and scrub ---------------------------------------------------------
@@ -852,10 +909,19 @@ impl Recording {
             .map(|spans| spans.clone())
             .unwrap_or_default();
 
-        // Only worth writing down if the mode moved. A recording that stayed in one mode
-        // already says which, and marking the whole of a listen-only transcript as
-        // having no microphone would tell the reader nothing they cannot see.
-        if self.switched.load(Ordering::Relaxed) {
+        // Only worth writing down if the recording's channels were not what its mode
+        // says throughout. A recording that stayed in one mode with both devices behaving
+        // already says which mode it was, and marking the whole of a listen-only
+        // transcript as having no microphone would tell the reader nothing they cannot
+        // see.
+        //
+        // A microphone that died counts as much as a press. The mode never moved, so the
+        // event still says `conversation` and the file is still stereo — and without the
+        // span the silent left channel reads as somebody sitting quietly through their
+        // own meeting.
+        let marked = self.switched.load(Ordering::Relaxed)
+            || self.shared.microphone_ever_lost.load(Ordering::Relaxed);
+        if marked {
             let _ = self.close_no_microphone_span(ended_ms);
             outcome.no_microphone_spans = self
                 .shared
@@ -1029,6 +1095,7 @@ fn spawn_writer(
             let mut next_echo_check = FIRST_ECHO_CHECK;
             let mut warned_about_drops = false;
             let mut warned_about_stalled_mic = false;
+            let mut declared_mic_lost = false;
             let mut mic_meter = 0.0f32;
             let mut system_meter = 0.0f32;
             let mut system_silent_seconds = 0.0f64;
@@ -1196,15 +1263,59 @@ fn spawn_writer(
                     if !warned_about_stalled_mic {
                         warned_about_stalled_mic = true;
                         tracing::warn!(
-                            "the microphone has delivered no audio for {:.1} s while still \
-                             open — the input device has most likely gone away. The left \
-                             channel is silence from here; system audio is unaffected",
+                            "the microphone has delivered nothing for {:.1} s; the file has \
+                             stopped waiting on it, and the left channel carries silence \
+                             until it comes back. System audio is unaffected",
                             mic_stalled_seconds
                         );
                     }
-                } else if warned_about_stalled_mic && !mic_stalled {
+                }
+
+                // The verdict, and the marker in the transcript. Kept apart from the
+                // padding above because they answer different questions: releasing the
+                // file is cheap and reversible and needs only a suspicion, while telling
+                // somebody their microphone failed — and writing a stretch of their
+                // meeting off as unheard — is an assertion that a hiccup does not support.
+                //
+                // The stretch starts where the audio stopped, not where the verdict was
+                // reached. Everything captured before the stall is still in the mixer's
+                // queue and still reaches the file, so the moment the buffers stopped is
+                // the honest boundary.
+                if mic_stalled_seconds >= MIC_LOST_AFTER && !declared_mic_lost {
+                    declared_mic_lost = true;
+                    shared.microphone_ever_lost.store(true, Ordering::Relaxed);
+                    let began_ms = (elapsed.as_millis() as i64
+                        - (mic_stalled_seconds * 1000.0) as i64)
+                        .max(0);
+                    let _ = shared.open_no_microphone_span(began_ms);
+                    if let Ok(mut status) = shared.status.lock() {
+                        status.microphone_lost = true;
+                    }
+                    tracing::error!(
+                        "the microphone has delivered nothing for {mic_stalled_seconds:.1} s \
+                         and is being treated as gone. The recording continues with system \
+                         audio; the stretch from {began_ms} ms is marked as having no \
+                         microphone"
+                    );
+                } else if declared_mic_lost && mic_present && !mic_stalled {
+                    // Delivering again. Gated on a microphone actually being open, so a
+                    // deliberate switch down does not read as a recovery and close a
+                    // stretch that is still running.
+                    //
+                    // The stretch it missed stays written down; only the live alarm
+                    // clears. A warning that cannot go away is one people learn to
+                    // ignore, and this one has to still mean something next time.
+                    declared_mic_lost = false;
                     warned_about_stalled_mic = false;
-                    tracing::info!("the microphone is delivering audio again");
+                    let at_ms = elapsed.as_millis() as i64;
+                    let _ = shared.close_no_microphone_span(at_ms);
+                    if let Ok(mut status) = shared.status.lock() {
+                        status.microphone_lost = false;
+                    }
+                    tracing::info!(
+                        "the microphone is delivering again {at_ms} ms in; the stretch \
+                         without one has been written down"
+                    );
                 }
                 // Only counted while a microphone is actually open. With no microphone
                 // there is nothing to be silent, and counting anyway would report a fault

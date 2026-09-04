@@ -224,8 +224,11 @@ pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> CommandResu
     }
 
     // The stretches with no microphone at all, and the sub-second gaps in system audio
-    // that opening one costs. Both are only ever present when the mode changed mid
-    // recording, and both are missing speech that the file cannot account for on its own.
+    // that opening one costs. Both are missing speech that the file cannot account for on
+    // its own. A `no_microphone` stretch is present when the mode changed mid-recording
+    // *or* when the input device went away while nobody asked it to — the second leaves
+    // the mode alone, so this is the only thing that will say the left channel's silence
+    // was a failure rather than a quiet room.
     let capture_spans: Vec<(&str, i64, i64)> = outcome
         .no_microphone_spans
         .iter()
@@ -240,7 +243,7 @@ pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> CommandResu
     if !capture_spans.is_empty() {
         state.db.replace_capture_spans(event_id, &capture_spans)?;
         tracing::info!(
-            "recording {event_id} changed mode; {} stretch(es) had a channel missing",
+            "recording {event_id}: {} stretch(es) had a channel missing",
             capture_spans.len()
         );
     }
