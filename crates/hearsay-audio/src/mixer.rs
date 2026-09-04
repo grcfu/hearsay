@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 /// cap, the faster one's backlog grows for the length of the meeting and its channel
 /// ends up increasingly delayed. One second is far beyond any legitimate scheduling
 /// jitter and far below anything a listener would notice being trimmed.
-const BACKLOG_SLACK_SECONDS: f32 = 1.0;
+pub(crate) const BACKLOG_SLACK_SECONDS: f32 = 1.0;
 
 /// How long microphone audio waits before it is committed to disk.
 ///

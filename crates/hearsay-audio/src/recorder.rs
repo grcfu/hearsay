@@ -1460,6 +1460,7 @@ mod status_contract {
             "mic_silent_seconds",
             "system_stalled_seconds",
             "mic_stalled_seconds",
+            "microphone_lost",
             "mic_peak",
             "system_peak",
             "losing_audio",
@@ -1570,6 +1571,108 @@ mod tests {
             system_gaps: Vec::new(),
             dropped_frames: 0,
         }
+    }
+
+    fn shared_for_test() -> Arc<Shared> {
+        Arc::new(Shared {
+            mixer: Mutex::new(Mixer::new(48_000, 2)),
+            writer: Mutex::new(None),
+            status: Mutex::new(RecordingStatus::default()),
+            mute_spans: Mutex::new(Vec::new()),
+            mute_started_ms: Mutex::new(None),
+            no_microphone_spans: Mutex::new(Vec::new()),
+            mic_closed_since: Mutex::new(None),
+            system_gaps: Mutex::new(Vec::new()),
+            stop: AtomicBool::new(false),
+            recheck_echo: AtomicBool::new(false),
+            scrubbed_samples: AtomicU64::new(0),
+            mic_buffers: AtomicU64::new(0),
+            system_buffers: AtomicU64::new(0),
+            microphone_ever_lost: AtomicBool::new(false),
+            analysis: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn spans(shared: &Shared) -> Vec<Span> {
+        shared
+            .no_microphone_spans
+            .lock()
+            .expect("the spans are readable")
+            .clone()
+    }
+
+    #[test]
+    fn a_stretch_without_a_microphone_is_written_down_when_it_closes() {
+        let shared = shared_for_test();
+        shared.open_no_microphone_span(1_000).expect("opens");
+        assert!(spans(&shared).is_empty(), "nothing is recorded until it closes");
+
+        shared.close_no_microphone_span(5_000).expect("closes");
+        assert_eq!(spans(&shared), vec![(1_000, 5_000)]);
+    }
+
+    /// The sequence this guards: the microphone dies, and a few seconds later the user
+    /// presses listen-only, agreeing with what already happened. Setting the start rather
+    /// than opening it would move it forward to the press and leave the seconds the
+    /// device was already dead unmarked — which is the reading §8 forbids, a gap whose
+    /// cause is missing reading as a choice.
+    #[test]
+    fn a_stretch_already_open_keeps_the_start_it_was_given() {
+        let shared = shared_for_test();
+        shared.open_no_microphone_span(1_000).expect("opens");
+        shared.open_no_microphone_span(4_000).expect("stays open");
+
+        shared.close_no_microphone_span(9_000).expect("closes");
+        assert_eq!(spans(&shared), vec![(1_000, 9_000)]);
+    }
+
+    #[test]
+    fn closing_a_stretch_that_was_never_open_records_nothing() {
+        let shared = shared_for_test();
+        shared.close_no_microphone_span(5_000).expect("closes");
+        assert!(spans(&shared).is_empty());
+    }
+
+    /// A microphone that dies and recovers leaves one closed stretch, and a later death
+    /// opens another rather than extending the first.
+    #[test]
+    fn a_microphone_that_dies_twice_leaves_two_stretches() {
+        let shared = shared_for_test();
+        shared.open_no_microphone_span(1_000).expect("opens");
+        shared.close_no_microphone_span(3_000).expect("closes");
+        shared.open_no_microphone_span(8_000).expect("opens again");
+        shared.close_no_microphone_span(9_500).expect("closes again");
+
+        assert_eq!(spans(&shared), vec![(1_000, 3_000), (8_000, 9_500)]);
+    }
+
+    /// The file stops waiting on a stalled microphone before the recording is willing to
+    /// say it has failed. Releasing the file is cheap and reversible; the claim is not.
+    #[test]
+    fn the_file_stops_waiting_before_the_microphone_is_declared_gone() {
+        assert!(
+            MIC_STALL_GRACE < MIC_LOST_AFTER,
+            "declaring the microphone gone before the file stops waiting on it would \
+             warn about a loss that was still happening"
+        );
+    }
+
+    /// The invariant the whole fix rests on. The system queue holds the commit delay plus
+    /// `BACKLOG_SLACK_SECONDS`, and starts evicting captured audio the moment it goes
+    /// over — so a grace longer than that slack would be paid for in exactly the dropped
+    /// system audio this exists to prevent, silently and with no marker in the transcript.
+    ///
+    /// One writer tick of headroom, because the padding takes effect on the tick after
+    /// the one that measured the stall.
+    #[test]
+    fn the_grace_is_shorter_than_the_backlog_can_absorb() {
+        let tick = WRITE_INTERVAL.as_secs_f64();
+        assert!(
+            MIC_STALL_GRACE + tick < crate::mixer::BACKLOG_SLACK_SECONDS as f64,
+            "a {MIC_STALL_GRACE} s grace plus a {tick} s tick does not fit inside {} s \
+             of backlog slack; system audio would be dropped before the file was released",
+            crate::mixer::BACKLOG_SLACK_SECONDS
+        );
     }
 
     /// The trap this guards: a recording that gained a microphone and then closed it
