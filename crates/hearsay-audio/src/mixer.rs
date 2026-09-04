@@ -248,6 +248,44 @@ impl Mixer {
         }
     }
 
+    /// Fills the microphone channel with zeros up to the system channel's length, and
+    /// returns how many frames that took.
+    ///
+    /// For an input device that has stopped delivering while still nominally open: an
+    /// interface unplugged mid-meeting, or AirPods that disconnected. Without this the
+    /// whole recording stops dead rather than one channel. [`Mixer::committable_frames`]
+    /// waits for both sides of every frame, so a microphone queue that never grows again
+    /// holds the *system* channel back too — the file stops growing, and once the system
+    /// backlog reaches `max_backlog` every frame after that is dropped. Dropped audio
+    /// leaves no marker in the transcript, so a dead microphone would quietly take the
+    /// rest of the meeting with it.
+    ///
+    /// **The zeros go in at the position the missing audio would have occupied**, which
+    /// is why this is a queue operation and not a flag saying "stop waiting". Simply not
+    /// waiting would let audio captured *after* the device recovered land where the gap
+    /// belongs, leaving the left channel permanently ahead of the right for the rest of
+    /// the recording and taking the speaker attribution resting on it along too. Padding
+    /// keeps the two sample-aligned whether the device comes back or not.
+    ///
+    /// The system channel is the reference because wall-clock time is the master and both
+    /// queues are fed at the same real-time rate, so in a healthy recording their lengths
+    /// track each other.
+    ///
+    /// Deliberately does **not** touch the arrival peak. No audio arrived; a meter that
+    /// moved for padding would report a dead microphone as a live one, which is the one
+    /// reading §6 exists to prevent.
+    pub fn pad_mic_to_system(&mut self) -> usize {
+        // A microphone deliberately closed needs no padding: `mic_present` already frees
+        // the system channel from waiting on it, and `take` pads an empty queue anyway.
+        if self.channels <= 1 || !self.mic_present {
+            return 0;
+        }
+        let target = self.system.len().min(self.max_backlog);
+        let missing = target.saturating_sub(self.mic.len());
+        self.mic.extend(std::iter::repeat(0.0).take(missing));
+        missing
+    }
+
     /// Zeroes everything the microphone channel is still holding.
     ///
     /// This is the retroactive scrub. Audio captured within the last
@@ -513,6 +551,99 @@ mod tests {
         mixer.push(Channel::Mic, &vec![0.5; 1_500]);
         assert!(mixer.dropped_frames() > 0);
         assert!(mixer.buffered_frames() <= 1_000);
+    }
+
+    // ---- a microphone that stops delivering ----
+
+    /// The failure this exists for. Waiting on both sides of every frame is what keeps
+    /// the channels aligned, and it is also what lets a dead microphone stop the file.
+    #[test]
+    fn a_microphone_that_stops_delivering_freezes_the_system_channel_too() {
+        let mut mixer = Mixer::with_delay(1_000, 2, 100);
+        mixer.push(Channel::Mic, &vec![0.5; 200]);
+        mixer.push(Channel::System, &vec![0.3; 400]);
+
+        // 200 mic frames against 400 system frames: only the shorter side counts, so
+        // 100 are committable and the other 200 frames of system audio are stuck.
+        assert_eq!(mixer.committable_frames(), 100);
+
+        assert_eq!(mixer.pad_mic_to_system(), 200);
+        assert_eq!(
+            mixer.committable_frames(),
+            300,
+            "padding must release the system audio the dead microphone was holding back"
+        );
+    }
+
+    /// Why this is a queue operation rather than a flag. Audio captured after the device
+    /// recovers has to land after the gap, not inside it.
+    #[test]
+    fn padding_keeps_a_recovered_microphone_aligned() {
+        let mut mixer = Mixer::new(1_000, 2);
+        mixer.push(Channel::Mic, &[0.5]);
+        mixer.push(Channel::System, &[0.1, 0.2, 0.3]);
+
+        // Two frames went by with the device delivering nothing.
+        assert_eq!(mixer.pad_mic_to_system(), 2);
+
+        // It comes back on the fourth frame.
+        mixer.push(Channel::Mic, &[0.8]);
+        mixer.push(Channel::System, &[0.4]);
+
+        let frames = mixer.take(4);
+        assert_eq!(
+            frames,
+            vec![0.5, 0.1, 0.0, 0.2, 0.0, 0.3, 0.8, 0.4],
+            "the recovered microphone must line up with the system audio captured beside it"
+        );
+    }
+
+    /// Padding is not audio arriving. A meter that moved for it would say a dead
+    /// microphone was live.
+    #[test]
+    fn padding_does_not_light_the_meter() {
+        let mut mixer = Mixer::new(1_000, 2);
+        mixer.push(Channel::System, &vec![0.6; 50]);
+        let _ = mixer.take_arrival_peaks();
+
+        assert_eq!(mixer.pad_mic_to_system(), 50);
+        assert_eq!(mixer.take_arrival_peaks(), (0.0, 0.0));
+    }
+
+    /// A deliberate switch down already frees the system channel, and the mic queue still
+    /// holds a minute of erasable audio the scrub can reach. Padding it would be wrong.
+    #[test]
+    fn a_deliberately_closed_microphone_is_not_padded() {
+        let mut mixer = Mixer::with_delay(1_000, 2, 100);
+        mixer.push(Channel::Mic, &vec![0.5; 200]);
+        mixer.push(Channel::System, &vec![0.3; 400]);
+        mixer.set_mic_present(false);
+
+        assert_eq!(mixer.pad_mic_to_system(), 0);
+        assert_eq!(
+            mixer.committable_frames(),
+            300,
+            "a closed microphone is already out of the way"
+        );
+    }
+
+    #[test]
+    fn listen_only_has_no_microphone_channel_to_pad() {
+        let mut mixer = Mixer::new(1_000, 1);
+        mixer.push(Channel::System, &vec![0.3; 40]);
+        assert_eq!(mixer.pad_mic_to_system(), 0);
+    }
+
+    /// Padding may not push the queue past the cap and start reporting dropped frames
+    /// against audio that was never captured in the first place.
+    #[test]
+    fn padding_stays_inside_the_backlog_cap() {
+        let mut mixer = Mixer::with_delay(1_000, 2, 100);
+        mixer.push(Channel::System, &vec![0.3; 1_100]);
+        let dropped_before = mixer.dropped_frames();
+
+        mixer.pad_mic_to_system();
+        assert_eq!(mixer.dropped_frames(), dropped_before);
     }
 
     // ---- the scrub window ----
