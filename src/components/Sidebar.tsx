@@ -31,6 +31,7 @@ interface LiveStatus {
   mic_silent_seconds: number;
   system_stalled_seconds: number;
   mic_stalled_seconds: number;
+  microphone_lost: boolean;
   muted: boolean;
   system_audio_lost: boolean;
   echo: { lag_ms: number; correlation: number } | null;
@@ -201,23 +202,29 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
   // trains people to ignore the certainty, and reporting a certainty as a guess wastes
   // the one chance to save the meeting.
 
-  // Certain, for the microphone only. An open input device delivers buffers at a fixed
-  // rate whatever the room is doing, so a count that has stopped moving means the device
-  // stopped — not that nobody is talking.
+  // Certain, for the microphone only, and the recorder's verdict rather than this pane's
+  // guess at one. An open input device delivers buffers at a fixed rate whatever the room
+  // is doing, so a count that has stopped moving means the device stopped — not that
+  // nobody is talking. `mic_stalled_seconds` is the evidence behind that; reading it here
+  // put the threshold in two places, and the one that mattered was the recorder's,
+  // because it is what decides when the stretch is marked in the transcript.
+  //
+  // It also could not tell a fault from a press: the count climbed after a deliberate
+  // switch down too, so closing your own microphone raised a banner saying it had failed.
   //
   // The same reasoning does not transfer to the tap, and must not be applied to it. A
   // process tap is driven by the tapped app's output: while that app is quiet it
   // delivers no buffers at all rather than buffers of zeros, so a stalled tap is the
   // ordinary state of any pause in a meeting. Alarming on it would fire every time
   // nobody spoke, which is the exact habit that teaches people to ignore the alarm.
-  const micStalled = recording && (live?.mic_stalled_seconds ?? 0) > 5;
+  const micLost = recording && (live?.microphone_lost ?? false);
 
   // The tap's verdict has to come from the helper, the only party that checks whether
   // the target was provably playing while the tap returned zeros. This is the failure
   // that cost a whole interview, and until now it reached the UI and was never rendered.
   const tapSilentWhilePlaying = recording && (live?.silent_while_audio_playing ?? false);
 
-  const stalledSource = micStalled ? "mic" : tapSilentWhilePlaying ? "system" : null;
+  const stalledSource = micLost ? "mic" : tapSilentWhilePlaying ? "system" : null;
 
   // The wrong app is selected: this tap is silent and something else has the speakers.
   // Certain enough to interrupt for, and the only warning that would have caught the
@@ -248,7 +255,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
       ? [
           "Hearsay has stopped capturing",
           stalledSource === "mic"
-            ? "Your microphone has stopped sending audio. Nothing you say is being recorded."
+            ? "Your microphone has stopped sending audio, so nothing you say is being recorded. System audio is still being captured, and the gap is marked in the transcript."
             : "The audio tap has stopped returning sound while the meeting is still playing. Nothing is being recorded.",
         ]
       : [
@@ -495,7 +502,7 @@ export function Sidebar({ mode, onModeChange, status, onRecorded, view, onViewCh
           {wrongSource.length > 0
             ? `Nothing is coming from the app you picked, but ${wrongSource.join(", ")} is playing. This is probably recording the wrong app.`
             : stalledSource === "mic"
-              ? "Your microphone has stopped. Nothing you say is being recorded."
+              ? "Your microphone has stopped — nothing you say is being recorded. The rest of the meeting still is, and the gap is marked in the transcript."
               : "Audio capture has stopped. The meeting is playing but nothing is reaching the file."}
         </span>
         <button type="button" className="button small" onClick={stop}>
