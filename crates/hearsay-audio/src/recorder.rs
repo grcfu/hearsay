@@ -65,6 +65,22 @@ const METER_FLOOR: f32 = 1e-4;
 /// usually by something else on the machine eating the CPU.
 const DROPPED_AUDIO_ALARM_MS: u64 = 1_000;
 
+/// How long a microphone may go without delivering a buffer before the mixer stops
+/// waiting on it.
+///
+/// Short on purpose, and for two independent reasons. An open input device delivers
+/// buffers at a fixed rate whatever the room is doing — the largest buffer any CoreAudio
+/// input negotiates is a few tens of milliseconds — so half a second with none at all is
+/// already conclusive rather than a guess. And the system queue has only
+/// `BACKLOG_SLACK_SECONDS` of room above the commit delay before it starts evicting
+/// audio, so a longer grace would be paid for in exactly the dropped system audio this
+/// exists to prevent.
+///
+/// This is only the point at which the *file* stops waiting, which is harmless and
+/// reversible. Deciding the microphone is gone, and saying so, is a stronger claim that
+/// waits longer.
+const MIC_STALL_GRACE: f64 = 0.6;
+
 /// What the UI reads while a recording is running.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RecordingStatus {
@@ -1012,6 +1028,7 @@ fn spawn_writer(
             let mut silent_frames = 0u64;
             let mut next_echo_check = FIRST_ECHO_CHECK;
             let mut warned_about_drops = false;
+            let mut warned_about_stalled_mic = false;
             let mut mic_meter = 0.0f32;
             let mut system_meter = 0.0f32;
             let mut system_silent_seconds = 0.0f64;
@@ -1091,20 +1108,26 @@ fn spawn_writer(
                 // Dropped audio is the one loss that leaves no trace in the file: the
                 // frames are simply not there, and nothing downstream can tell they were
                 // ever captured. Counting them is useless unless somebody is told.
-                let (dropped_frames, stereo, (mic_arrival, system_arrival)) = shared
-                    .mixer
-                    .lock()
-                    .map(|mut mixer| {
-                        (
-                            mixer.dropped_frames(),
-                            mixer.channels() >= 2,
-                            // Read every tick, not only the ticks that commit — a
-                            // recording holding its first minute back for the scrub
-                            // still has to show that audio is arriving.
-                            mixer.take_arrival_peaks(),
-                        )
-                    })
-                    .unwrap_or((0, false, (0.0, 0.0)));
+                let (dropped_frames, stereo, mic_present, (mic_arrival, system_arrival)) =
+                    shared
+                        .mixer
+                        .lock()
+                        .map(|mut mixer| {
+                            (
+                                mixer.dropped_frames(),
+                                mixer.channels() >= 2,
+                                // Whether anything is *feeding* the mic channel, which is
+                                // not the same question as whether the file has one. A
+                                // file stays stereo for good once it has been widened,
+                                // and the microphone can be closed again afterwards.
+                                mixer.mic_present(),
+                                // Read every tick, not only the ticks that commit — a
+                                // recording holding its first minute back for the scrub
+                                // still has to show that audio is arriving.
+                                mixer.take_arrival_peaks(),
+                            )
+                        })
+                        .unwrap_or((0, false, false, (0.0, 0.0)));
                 // `rate` is clamped to at least 1 where it is bound, so this cannot divide by zero.
                 let dropped_ms = dropped_frames * 1000 / rate;
                 let losing_audio = dropped_ms >= DROPPED_AUDIO_ALARM_MS;
@@ -1134,7 +1157,11 @@ fn spawn_writer(
                 // from the helper, the only party that checks whether the target was
                 // actually playing.
                 let system_stalled = system_buffers == last_system_buffers;
-                let mic_stalled = stereo && mic_buffers == last_mic_buffers;
+                // Gated on a microphone being open, not on the file being stereo. After a
+                // deliberate switch down the file is still stereo and no buffers are
+                // arriving because nobody is sending any — reading that as a stalled
+                // device reported a fault against the user's own press.
+                let mic_stalled = mic_present && mic_buffers == last_mic_buffers;
                 last_system_buffers = system_buffers;
                 last_mic_buffers = mic_buffers;
 
@@ -1153,10 +1180,36 @@ fn spawn_writer(
                 } else {
                     mic_stalled_seconds = 0.0;
                 }
-                // Only counted while a microphone is actually open. In listen-only there
-                // is nothing to be silent, and counting anyway would report a fault
+
+                // A microphone that has stopped delivering must not be waited on. The
+                // mixer commits a frame only once both sides of it exist, so a stalled
+                // input device holds the *system* channel back with it: the file stops
+                // growing, and a second later every system frame captured after that is
+                // evicted from the backlog and lost with no marker in the transcript.
+                // Padding the gap with zeros releases the system channel, and puts the
+                // zeros where the missing audio belongs so the two stay aligned if the
+                // device comes back.
+                if mic_stalled_seconds >= MIC_STALL_GRACE {
+                    if let Ok(mut mixer) = shared.mixer.lock() {
+                        mixer.pad_mic_to_system();
+                    }
+                    if !warned_about_stalled_mic {
+                        warned_about_stalled_mic = true;
+                        tracing::warn!(
+                            "the microphone has delivered no audio for {:.1} s while still \
+                             open — the input device has most likely gone away. The left \
+                             channel is silence from here; system audio is unaffected",
+                            mic_stalled_seconds
+                        );
+                    }
+                } else if warned_about_stalled_mic && !mic_stalled {
+                    warned_about_stalled_mic = false;
+                    tracing::info!("the microphone is delivering audio again");
+                }
+                // Only counted while a microphone is actually open. With no microphone
+                // there is nothing to be silent, and counting anyway would report a fault
                 // against a mode whose whole promise is that the mic is closed.
-                if stereo {
+                if mic_present {
                     if mic_arrival > 0.0 {
                         mic_silent_seconds = 0.0;
                     } else {
