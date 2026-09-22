@@ -52,10 +52,28 @@ pub(crate) const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v
 /// not a frontier task, and §8a already picks Flash over Pro for the same reason — and
 /// the alias sits at the end as the backstop that cannot rot. Whichever answers is
 /// recorded in `events.model_used`, so what produced a summary is never a guess.
+///
+/// Checked against the API on 22 September 2026, one candidate at a time, because a
+/// summary that fails reports only the last model's error and every earlier failure is
+/// invisible from the outside:
+///
+/// | Candidate | Result |
+/// |---|---|
+/// | `gemini-3.5-flash` | no response inside 45s |
+/// | `gemini-3.6-flash` | answered, 1.4s |
+/// | `gemini-2.5-flash` | 404, "no longer available to new users... use `gemini-3.6-flash`" |
+/// | `gemini-flash-latest` | answered, 5.0s |
+/// | `gemini-3.7-flash` | answered, 4.2s |
+/// | `gemini-3.8-flash` | 503, high demand — general availability three weeks earlier |
+///
+/// Two of the four in the list had stopped being worth an attempt, and the first of them
+/// hung rather than refusing, so every summary paid a timeout before anything else was
+/// tried. `gemini-3.8-flash` is left out deliberately: it is the newest release and the
+/// bullet above is exactly about it, so listing it would spend three attempts on a 503
+/// and then three more on the alias, which resolves to it.
 pub const GEMINI_MODELS: &[&'static str] = &[
-    "gemini-3.5-flash",
     "gemini-3.6-flash",
-    "gemini-2.5-flash",
+    "gemini-3.7-flash",
     // Last, deliberately: if every name above has been retired, this is still something.
     "gemini-flash-latest",
 ];
