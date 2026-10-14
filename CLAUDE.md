@@ -544,6 +544,15 @@ blip reads as a bad key, a retired model, or something wrong with the recording.
   attempt, the total, and the seconds, and both panes say the provider is busy and when
   the next attempt goes out. The summary pane adds that nothing has been lost; the Ask
   pane does not need to, because the question is still in front of the person.
+- **A spent daily quota is not a busy provider**, although both arrive as 429. Gemini's
+  free tier gives each model its own count of requests per day, and once it is used up
+  the answer is a `QuotaFailure` whose `quotaId` names a `PerDay` window and a
+  `RetryInfo` measured in hours. Read as busy, it was waited on three times and then
+  reported as "too busy, try again in a minute" on a model that could not answer until
+  the next day. So it is not retried: the walk moves straight to the next model, which
+  has a count of its own, and a walk that fails says which models had no quota left and
+  when the provider says it resets. Read from `quotaId`, not the message prose. A
+  per-minute quota is still an ordinary busy wait.
 - **A timeout or a failed connection is deliberately not retried**, even though it might
   well succeed. The provider may have received and processed that request, so sending it
   again is a second upload of the transcript and a second charge on the user's key for an

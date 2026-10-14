@@ -20,7 +20,7 @@ use crate::secrets;
 use crate::summary::{
     asked_wait_body, asked_wait_header, is_transient, render_transcript, speaker_or_default,
     across_models, across_thinking_dialects, rejected_the_thinking_hint, Busy, Marker,
-    ModelGone, Provider, RetryNotice, ThinkingRejected,
+    gemini_daily_quota_spent, ModelGone, Provider, QuotaSpent, RetryNotice, ThinkingRejected,
     API_URL, API_VERSION, FALLBACK_BETA, GEMINI_URL,
 };
 
@@ -301,6 +301,16 @@ fn ask_gemini_once(
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("no detail given");
+        // Before the busy check: a spent daily quota is a 429 too, and waiting it out
+        // would sit through every retry on a model that cannot answer until tomorrow.
+        if gemini_daily_quota_spent(status.as_u16(), &body) {
+            return Err(QuotaSpent {
+                provider: "the Gemini API",
+                model: model.to_string(),
+                resets_in: asked_wait_body(&body),
+            }
+            .into());
+        }
         if is_transient(status.as_u16()) {
             return Err(Busy {
                 provider: "the Gemini API",

@@ -267,10 +267,89 @@ pub struct ModelGone {
     pub message: String,
 }
 
+/// A model whose daily allowance on this key is used up.
+///
+/// Gemini's free tier gives each model its own count of requests per day, and once it is
+/// spent the API answers 429 with a `RetryInfo` measured in hours. That status is shared
+/// with a per-minute rate limit, which *is* worth waiting out, and read as one the walk
+/// waited thirty seconds three times over on a model that would not answer until the next
+/// day, then told the user the provider was busy and to try again in a minute.
+///
+/// Its own kind of error because it is neither of the two it was being read as. It is not
+/// a blip — sending the same request again collects the same refusal until the quota
+/// resets — and it is not a verdict on the request either: the count is per model, so the
+/// next candidate has an allowance of its own.
+#[derive(Debug, thiserror::Error)]
+#[error("{provider}'s daily quota for {model} on this key is used up{}", resets_in_words(*.resets_in))]
+pub struct QuotaSpent {
+    pub provider: &'static str,
+    pub model: String,
+    /// How long until the provider says the count resets, when it said.
+    pub resets_in: Option<Duration>,
+}
+
+/// " — it resets in about 21 hours", or nothing when the provider gave no figure.
+fn resets_in_words(resets_in: Option<Duration>) -> String {
+    let Some(wait) = resets_in else {
+        return String::new();
+    };
+    let minutes = wait.as_secs().div_ceil(60);
+    if minutes < 90 {
+        format!(" — it resets in about {minutes} minutes")
+    } else {
+        format!(" — it resets in about {} hours", (minutes + 30) / 60)
+    }
+}
+
+/// Whether a Gemini 429 is a spent daily quota rather than a rate limit.
+///
+/// Read from the `QuotaFailure` detail Google attaches, whose `quotaId` names the window —
+/// `GenerateRequestsPerDayPerProjectPerModel-FreeTier` — rather than from the message
+/// text, which is prose and changes. A per-minute quota is left to the ordinary busy
+/// retry, which is what it is for.
+pub(crate) fn gemini_daily_quota_spent(status: u16, body: &serde_json::Value) -> bool {
+    if status != 429 {
+        return false;
+    }
+    let Some(details) = body
+        .get("error")
+        .and_then(|error| error.get("details"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    details
+        .iter()
+        .filter(|detail| {
+            detail
+                .get("@type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind.ends_with("QuotaFailure"))
+        })
+        .filter_map(|detail| detail.get("violations").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(|violation| violation.get("quotaId").and_then(serde_json::Value::as_str))
+        .any(|id| id.contains("PerDay"))
+}
+
 /// Whether an error means another model is worth trying: the provider ran out of
-/// capacity for this one, or does not have it at all.
+/// capacity for this one, has used up this key's allowance for it, or does not have it
+/// at all.
 fn worth_another_model(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<Busy>().is_some() || error.downcast_ref::<ModelGone>().is_some()
+    error.downcast_ref::<Busy>().is_some()
+        || error.downcast_ref::<QuotaSpent>().is_some()
+        || error.downcast_ref::<ModelGone>().is_some()
+}
+
+/// What became of one model in a walk that moved past it, in a few words.
+fn why_passed_over(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<QuotaSpent>().is_some() {
+        "daily quota used up"
+    } else if error.downcast_ref::<ModelGone>().is_some() {
+        "not offered to this key"
+    } else {
+        "busy"
+    }
 }
 
 /// Tries each model in turn, moving on when one is out of capacity or gone, and returns
@@ -296,7 +375,7 @@ fn walking<T>(
     mut report: impl FnMut(RetryNotice),
     mut attempt: impl FnMut(&str) -> Result<T>,
 ) -> Result<(T, &'static str)> {
-    let mut tried: Vec<&str> = Vec::new();
+    let mut tried: Vec<String> = Vec::new();
     let mut last: Option<anyhow::Error> = None;
 
     for model in models {
@@ -304,7 +383,7 @@ fn walking<T>(
             Ok(value) => return Ok((value, model)),
             Err(error) if worth_another_model(&error) => {
                 tracing::warn!("{model} is unavailable, trying the next: {error:#}");
-                tried.push(model);
+                tried.push(format!("{model} ({})", why_passed_over(&error)));
                 last = Some(error);
             }
             // A verdict on the request. Every other model would return it too.
@@ -313,8 +392,9 @@ fn walking<T>(
     }
 
     let error = last.unwrap_or_else(|| anyhow!("no model was configured to try"));
-    // Name them all: told only about the last, this reads as one model being broken
-    // rather than as the provider being out of capacity across the board.
+    // Name them all, and what each said: told only about the last, this reads as one
+    // model being broken rather than as the provider being out of capacity across the
+    // board — and a quota spent on the first reads as the provider being busy.
     Err(error.context(format!("tried {}", tried.join(", "))))
 }
 
@@ -763,6 +843,16 @@ fn summarize_gemini_once(
             .and_then(|error| error.get("message"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("no detail given");
+        // Before the busy check: a spent daily quota is a 429 too, and waiting it out
+        // would sit through every retry on a model that cannot answer until tomorrow.
+        if gemini_daily_quota_spent(status.as_u16(), &body) {
+            return Err(QuotaSpent {
+                provider: "the Gemini API",
+                model: model.to_string(),
+                resets_in: asked_wait_body(&body),
+            }
+            .into());
+        }
         if is_transient(status.as_u16()) {
             return Err(Busy {
                 provider: "the Gemini API",
@@ -1462,6 +1552,122 @@ mod tests {
         let error = format!("{:#}", outcome.expect_err("nothing answered"));
         assert!(error.contains("gemini-3.5-flash"), "{error}");
         assert!(error.contains("gemini-flash-latest"), "{error}");
+    }
+
+    /// A 429 as Gemini's free tier sends it once a model's daily count is spent, trimmed
+    /// from a real response.
+    fn quota_body(quota_id: &str, retry_delay: &str) -> serde_json::Value {
+        serde_json::json!({
+            "error": {
+                "code": 429,
+                "message": "You exceeded your current quota, please check your plan and \
+                            billing details.",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [{
+                            "quotaMetric":
+                                "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                            "quotaId": quota_id,
+                            "quotaDimensions": { "location": "global", "model": "gemini-3.6-flash" },
+                            "quotaValue": "20"
+                        }]
+                    },
+                    {
+                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                        "retryDelay": retry_delay
+                    }
+                ]
+            }
+        })
+    }
+
+    /// The failure that started this: twenty summaries in a day on the free tier, and the
+    /// twenty-first sat through three thirty-second waits before calling the provider busy.
+    #[test]
+    fn a_spent_daily_quota_is_recognised() {
+        let body = quota_body("GenerateRequestsPerDayPerProjectPerModel-FreeTier", "73991s");
+        assert!(gemini_daily_quota_spent(429, &body));
+        assert_eq!(asked_wait_body(&body), Some(Duration::from_secs(73_991)));
+    }
+
+    /// A per-minute limit clears inside the retry's own wait, so it stays a `Busy`.
+    #[test]
+    fn a_per_minute_limit_is_not_a_spent_quota() {
+        let body = quota_body("GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "17s");
+        assert!(!gemini_daily_quota_spent(429, &body));
+        assert!(!gemini_daily_quota_spent(503, &quota_body("PerDay", "1s")));
+        assert!(!gemini_daily_quota_spent(429, &serde_json::json!({ "error": {} })));
+    }
+
+    /// Waiting out a quota that resets tomorrow is the one thing the retry must not do. The
+    /// next model has a count of its own, so it is tried straight away.
+    #[test]
+    fn a_spent_quota_moves_on_without_waiting() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let outcome = walking(
+            &["gemini-3.6-flash", "gemini-3.5-flash-lite"],
+            Duration::from_secs(3600),
+            |_| panic!("a spent quota must not be retried"),
+            |model| {
+                asked.borrow_mut().push(model.to_string());
+                if model == "gemini-3.6-flash" {
+                    return Err(QuotaSpent {
+                        provider: "the Gemini API",
+                        model: model.to_string(),
+                        resets_in: Some(Duration::from_secs(73_991)),
+                    }
+                    .into());
+                }
+                Ok("summary")
+            },
+        );
+
+        assert_eq!(outcome.expect("the next model has its own quota").1, "gemini-3.5-flash-lite");
+        assert_eq!(*asked.borrow(), ["gemini-3.6-flash", "gemini-3.5-flash-lite"]);
+    }
+
+    /// Reported as busy, a spent quota sends the user back in a minute to the same refusal.
+    #[test]
+    fn a_walk_that_fails_says_which_model_had_no_quota_left() {
+        let outcome: Result<((), &str)> = walking(
+            &["gemini-3.6-flash", "gemini-3.7-flash"],
+            Duration::ZERO,
+            ignore_retries,
+            |model| {
+                if model == "gemini-3.6-flash" {
+                    return Err(QuotaSpent {
+                        provider: "the Gemini API",
+                        model: model.to_string(),
+                        resets_in: Some(Duration::from_secs(73_991)),
+                    }
+                    .into());
+                }
+                Err(Busy {
+                    provider: "the Gemini API",
+                    status: 503,
+                    message: "high demand".to_string(),
+                    retry_after: None,
+                }
+                .into())
+            },
+        );
+
+        let error = format!("{:#}", outcome.expect_err("nothing answered"));
+        assert!(error.contains("gemini-3.6-flash (daily quota used up)"), "{error}");
+        assert!(error.contains("gemini-3.7-flash (busy)"), "{error}");
+    }
+
+    #[test]
+    fn a_quota_reset_is_given_in_words() {
+        let spent = |resets_in| {
+            QuotaSpent { provider: "the Gemini API", model: "m".to_string(), resets_in }
+                .to_string()
+        };
+        assert!(spent(Some(Duration::from_secs(73_991))).ends_with("about 21 hours"));
+        assert!(spent(Some(Duration::from_secs(600))).ends_with("about 10 minutes"));
+        assert!(spent(None).ends_with("is used up"));
     }
 
     /// The alias is the backstop and must stay last: it is hot-swapped to whatever Google
