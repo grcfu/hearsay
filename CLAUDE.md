@@ -457,10 +457,14 @@ order and uses the first that answers.
 
 So a mature stable release is tried first — summarising is not a frontier task, which is
 the same reason §8a picks Flash over Pro — and **the alias stays last**, as the backstop
-that cannot rot. A 503 that survives all three attempts, or a 404 for a name that has been
-retired, moves to the next candidate; **any other rejection stops the walk**, because a bad
-key or an over-long transcript would be rejected identically by every model and trying
-them all would upload the transcript once per model to learn the same thing.
+that cannot rot. **A Flash-Lite release sits just ahead of the alias**: Gemini's free tier
+counts requests per model per day, and a Lite model has an allowance of its own that is
+still there when the Flash models are all busy or spent — a slightly plainer summary
+beats none. A 503 that survives all three attempts, a spent daily quota, or a 404 for a
+name that has been retired, moves to the next candidate; **any other rejection stops the
+walk**, because a bad key or an over-long transcript would be rejected identically by
+every model and trying them all would upload the transcript once per model to learn the
+same thing.
 
 **`events.model_used` records the model that answered, not the one asked first** — they
 differ whenever the first choice was out of capacity, and a summary whose provenance is a

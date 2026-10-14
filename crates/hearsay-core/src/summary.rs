@@ -71,9 +71,29 @@ pub(crate) const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v
 /// tried. `gemini-3.8-flash` is left out deliberately: it is the newest release and the
 /// bullet above is exactly about it, so listing it would spend three attempts on a 503
 /// and then three more on the alias, which resolves to it.
+///
+/// Checked again on 13 October 2026, on an hour-long fabricated transcript, after every
+/// summary for eleven days had failed:
+///
+/// | Candidate | Result |
+/// |---|---|
+/// | `gemini-3.6-flash` | answered in 2–5s, until its free-tier allowance of 20 a day ran out |
+/// | `gemini-3.7-flash` | 503, high demand, on every attempt |
+/// | `gemini-flash-latest` | 503 on every attempt, then 429 on its own daily quota |
+/// | `gemini-3.5-flash` | answered, but its quota is `gemini-3.6-flash`'s, so it adds nothing |
+/// | `gemini-3.5-flash-lite` | answered in under 2s on every attempt, on a quota of its own |
+///
+/// With the two after it both out of capacity, the list had one working model, and on a
+/// free-tier key that is twenty summaries and questions a day. `gemini-3.5-flash-lite` goes
+/// in ahead of the alias: a smaller model, but summarising is reorganising text under a
+/// fixed schema, and on a free-tier key its separate allowance is what keeps a summary
+/// arriving once the Flash quota is spent.
 pub const GEMINI_MODELS: &[&'static str] = &[
     "gemini-3.6-flash",
     "gemini-3.7-flash",
+    // A separate daily quota from the Flash models above, and the one still answering
+    // when they are all busy or spent.
+    "gemini-3.5-flash-lite",
     // Last, deliberately: if every name above has been retired, this is still something.
     "gemini-flash-latest",
 ];
