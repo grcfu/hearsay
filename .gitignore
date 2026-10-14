@@ -64,6 +64,10 @@ DerivedData/
 .AppleDouble
 .LSOverride
 Icon?
+# `Icon?` is for the Finder's custom-icon file, but on a case-insensitive filesystem it
+# also matches src-tauri/icons/. The app icons were never committed as a result, and a
+# fresh clone could not build.
+!src-tauri/icons/
 ._*
 
 # --- Editors ---
