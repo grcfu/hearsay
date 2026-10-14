@@ -25,7 +25,7 @@ pub fn generate_summary(
 ) -> CommandResult<()> {
     if !summary::is_available() {
         return Err(CommandError {
-            message: "no Anthropic API key is set. Add one in settings — recording, \
+            message: "no API key is set. Add one in settings — recording, \
                       transcription and search all work without it."
                 .to_string(),
         });
