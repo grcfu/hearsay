@@ -302,6 +302,14 @@ left channel and breaking speaker attribution. Handle it **two cheap ways only**
    closely matching a system-channel segment within 3 seconds. Normalized similarity,
    threshold ≈ **0.82**.
 
+   "Within 3 seconds" is measured between the two segments' **spans**, not their start
+   times: the recogniser starts a segment where the previous one ended, so a mic line
+   after a pause is stretched back over it and can start seconds before the original it
+   overlaps. And the mic line is compared against **runs of up to three adjacent system
+   segments** as well as single ones, because the channels are segmented separately and
+   one routinely splits a sentence the other heard whole. Both were missed by a test
+   recording on speakers, leaving the other party's words attributed to the user.
+
 **Do not implement** acoustic echo cancellation, adaptive filters, NLMS, or double-talk detection.
 
 ---

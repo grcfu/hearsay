@@ -15,7 +15,20 @@
 use crate::transcribe::TranscriptSegment;
 
 /// How far apart an echo and its original can be and still be the same utterance.
+///
+/// Measured between the two segments' spans, not their start times. The recogniser
+/// starts a segment where the previous one ended, so a mic line that follows a pause is
+/// stretched back over it: an echo heard from 15.4s came back on the mic as 7.9s to
+/// 16.8s, overlapping its original, and start-to-start it was seven seconds away.
 const MAX_GAP_MS: i64 = 3_000;
+
+/// The most adjacent system segments joined together to compare against one mic segment.
+///
+/// The two channels are segmented separately, and one routinely breaks a sentence the
+/// other heard whole — "When you have Champion, who's 6-6," and "sitting next to Lini
+/// Tarno, who's 6-5," on the system channel, one line on the mic. Neither half is close
+/// to the whole. Small, so a run never grows into a paragraph that dilutes the match.
+const MAX_JOINED: usize = 3;
 
 /// Similarity above which two segments are the same sentence.
 ///
@@ -34,11 +47,12 @@ const MIN_COMPARABLE_CHARS: usize = 12;
 pub fn drop_echoed_segments(
     segments: Vec<TranscriptSegment>,
 ) -> (Vec<TranscriptSegment>, usize) {
-    let system: Vec<(i64, String)> = segments
+    let mut system: Vec<(i64, i64, String)> = segments
         .iter()
         .filter(|segment| segment.channel == "system")
-        .map(|segment| (segment.start_ms, normalise(&segment.text)))
+        .map(|segment| (segment.start_ms, segment.end_ms, normalise(&segment.text)))
         .collect();
+    system.sort_by_key(|(start_ms, _, _)| *start_ms);
 
     if system.is_empty() {
         return (segments, 0);
@@ -56,9 +70,19 @@ pub fn drop_echoed_segments(
                 return true;
             }
 
-            let echoed = system.iter().any(|(start_ms, text)| {
-                (segment.start_ms - start_ms).abs() <= MAX_GAP_MS
-                    && similarity(&candidate, text) >= SIMILARITY_THRESHOLD
+            // The system lines near this one, in order, so a run of them is contiguous.
+            let near: Vec<&str> = system
+                .iter()
+                .filter(|(start_ms, end_ms, _)| {
+                    gap_ms(segment.start_ms, segment.end_ms, *start_ms, *end_ms) <= MAX_GAP_MS
+                })
+                .map(|(_, _, text)| text.as_str())
+                .collect();
+
+            let echoed = (0..near.len()).any(|first| {
+                (first + 1..=near.len().min(first + MAX_JOINED)).any(|last| {
+                    similarity(&candidate, &near[first..last].join(" ")) >= SIMILARITY_THRESHOLD
+                })
             });
 
             if echoed {
@@ -70,6 +94,11 @@ pub fn drop_echoed_segments(
         .collect();
 
     (kept, dropped)
+}
+
+/// The time between two spans, zero when they overlap.
+fn gap_ms(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> i64 {
+    (a_start.max(b_start) - a_end.min(b_end)).max(0)
 }
 
 /// Lowercases, strips punctuation, and collapses whitespace.
@@ -212,6 +241,63 @@ mod tests {
 
         let (_, dropped) = drop_echoed_segments(segments);
         assert_eq!(dropped, 1);
+    }
+
+    fn spanning(channel: &str, start_ms: i64, end_ms: i64, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            start_ms,
+            end_ms,
+            text: text.to_string(),
+            channel: channel.to_string(),
+        }
+    }
+
+    /// A real conversation-mode test recording, on speakers, with a video playing. Both
+    /// echoes survived: the first because the mic line was stretched back over a pause
+    /// and started seven seconds before its original, the second because the system
+    /// channel split the sentence the mic heard whole.
+    #[test]
+    fn echoes_from_a_real_recording_on_speakers_are_dropped() {
+        let segments = vec![
+            spanning("mic", 850, 3_850, "Hi, so this is just a test."),
+            spanning("mic", 3_850, 7_850, "Then I'm also just gonna play the videos to see if you can hear."),
+            spanning("mic", 7_850, 16_790, "Matchup that Nebraska wants to avoid."),
+            spanning("system", 15_380, 17_380, "can matchups that Nebraska wants to avoid."),
+            spanning("mic", 16_790, 21_790, "When you have champion who's 6-6 sitting next to Linney Tarno who's 6-5,"),
+            spanning("system", 17_380, 19_380, "When you have Champion, who's 6-6,"),
+            spanning("system", 19_380, 21_380, "sitting next to Lini Tarno, who's 6-5,"),
+            spanning("system", 21_380, 23_380, "that is a wall to try to get through."),
+        ];
+
+        let (kept, dropped) = drop_echoed_segments(segments);
+        assert_eq!(dropped, 2);
+        let mic: Vec<&str> = kept
+            .iter()
+            .filter(|segment| segment.channel == "mic")
+            .map(|segment| segment.text.as_str())
+            .collect();
+        assert_eq!(
+            mic,
+            [
+                "Hi, so this is just a test.",
+                "Then I'm also just gonna play the videos to see if you can hear.",
+            ],
+            "only the user's own words stay on the mic channel"
+        );
+        assert_eq!(kept.iter().filter(|s| s.channel == "system").count(), 4);
+    }
+
+    /// Joining runs must not let a mic line match text the other party said well away
+    /// from it.
+    #[test]
+    fn a_split_sentence_far_away_in_time_is_not_an_echo() {
+        let segments = vec![
+            spanning("system", 1_000, 3_000, "When you have Champion, who's 6-6,"),
+            spanning("system", 3_000, 5_000, "sitting next to Lini Tarno, who's 6-5,"),
+            spanning("mic", 20_000, 25_000, "When you have champion who's 6-6 sitting next to Linney Tarno who's 6-5,"),
+        ];
+        let (_, dropped) = drop_echoed_segments(segments);
+        assert_eq!(dropped, 0);
     }
 
     #[test]
